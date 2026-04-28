@@ -10,7 +10,7 @@
 > ### 🎉 SemBench has been accepted to VLDB 2026! 🎉
 > **Proceedings of the VLDB Endowment (PVLDB), Volume 19**
 >
-> [Paper](https://arxiv.org/abs/2511.01716) &nbsp;|&nbsp; [Online Leaderboard](https://sembench.ngrok.io/) &nbsp;|&nbsp; [Submit Your System](https://sembench.ngrok.io/submit.html) &nbsp;|&nbsp; [Multi-Modal Datasets](https://drive.google.com/drive/folders/1pqf8DKFai16MR80Z7pcls5FgBbom-IJt?usp=sharing)
+> [Paper](https://arxiv.org/abs/2511.01716) &nbsp;|&nbsp; [Online Leaderboard](https://sembench.org) &nbsp;|&nbsp; [Submit Your System](https://sembench.github.io/SemBench/submit.html) &nbsp;|&nbsp; [Multi-Modal Datasets](https://drive.google.com/drive/folders/1pqf8DKFai16MR80Z7pcls5FgBbom-IJt?usp=sharing)
 
 </div>
 
@@ -33,7 +33,7 @@ SemBench introduces diversity across three key dimensions: **scenarios, modaliti
 
 Currently SemBench is evalulated on **three academic systems (LOTUS, Palimpzest, and ThalamusDB) and one industrial system, Google BigQuery**. Although these results reflect a snapshot of systems under continuous development, our study offers crucial insights into their current strengths and weaknesses, illuminating promising directions for future research.
 
-We understand that every system is under rapid development, which is why we maintain an [online leaderboard](https://sembench.ngrok.io/). We encourage you to submit your system's results and participate in the benchmark. Please reach out to discuss how to contribute your results to the leaderboard.
+We understand that every system is under rapid development, which is why we maintain an [online leaderboard](https://sembench.org). We encourage you to submit your system's results and participate in the benchmark. Please reach out to discuss how to contribute your results to the leaderboard.
 
 ## To Users: SemBench — A Simple, Ready-to-Use Benchmark
 
