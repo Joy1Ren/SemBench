@@ -37,8 +37,7 @@ def run(data_dir: str):
         The predominant color of the depicted product should be black.
         If there are multiple products in the picture, always refer to the most promiment one.
         The description of the product is as follows:
-        {productDisplayName} {productDescriptors}"""
-    )
+        {productDisplayName} {productDescriptors} {images}""")
     bottomwear = styles_details.sem_filter("""
         You will receive an image and a description of a product.
         Determine whether the product can be worn on the lower part of the body, like pants, shorts, skirts, ...
@@ -46,8 +45,7 @@ def run(data_dir: str):
         Do not consider swimwear.
         If there are multiple products in the picture, always refer to the most promiment one.
         The description of the product is as follows:
-        {productDisplayName} {productDescriptors}"""
-    )
+        {productDisplayName} {productDescriptors} {images}""")
     topwear = styles_details.sem_filter("""
         You will receive an image and a description of a product.
         Determine whether the product can be worn on the upper part of the body, like t-shirts, shirts, pullovers, hoodies, but still require some sort of clothing on the lower body, which means, e.g., not a dress.
@@ -55,8 +53,7 @@ def run(data_dir: str):
         Do not consider swimwear.
         If there are multiple products in the picture, always refer to the most promiment one.
         The description of the product is as follows:
-        {productDisplayName} {productDescriptors}"""
-    )
+        {productDisplayName} {productDescriptors} {images}""")
     accessories = styles_details[styles_details["price"] <= 500]
     accessories = accessories.sem_filter("""
         You will receive an image and a description of a product.
@@ -64,8 +61,7 @@ def run(data_dir: str):
         A bag might be a handbag or a (gym) backpack or some other type of bag.
         If there are multiple products in the picture, always refer to the most promiment one.
         The description of the product is as follows:
-        {productDisplayName} {productDescriptors}"""
-    )
+        {productDisplayName} {productDescriptors} {images}""")
 
     # Perform joins
     processed_1 = footwear.sem_join(
