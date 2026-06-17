@@ -28,8 +28,8 @@ from importlib.util import find_spec
 from types import BuiltinFunctionType, FunctionType, ModuleType
 from typing import Any
 
-from .tools import Tool
-from .utils import BASE_BUILTIN_MODULES, truncate_content
+from agent.tools import Tool
+from agent.utils import BASE_BUILTIN_MODULES, truncate_content
 
 
 logger = logging.getLogger(__name__)
