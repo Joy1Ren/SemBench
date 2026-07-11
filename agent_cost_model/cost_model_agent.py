@@ -1,45 +1,9 @@
-"""A minimal, self-contained tool-loop agent for *cost-model* reasoning over
-physical query plans.
-
-This is a stripped-down cousin of the OfficeQA `MultiTurnAgent` / `SearchAgent`.
-It keeps the parts that matter for the cost-model research project and drops
-everything that doesn't:
-
-  KEPT
-    * a bounded multi-turn loop (<= max_steps)
-    * one fenced block per step: a ```python``` tool call OR a ```json``` final answer
-    * python execution in a sandboxed `LocalPythonExecutor`
-    * a flat message trajectory (list of {"role", "content"} dicts)
-
-  DROPPED (relative to SearchAgent)
-    * the `TextBlock` / `ChunkBlock` trajectory abstraction (no retrieval ⇒ no
-      pruning / redaction), so messages are plain strings
-    * vector search / grep / read-document tools
-    * the skunk `ExecutionContext`, `PromptedCall`, `LLMClient`, prompt overrides
-
-  ADDED (the point of this agent)
-    * `inspect_plan`      -- introspect a physical (sub)plan's operators
-    * `estimate_plan_cost`-- apply the *current* cost model to a (sub)plan
-    * `update_cost_model` -- install a cost-model class the agent just authored
-    * `execute_subplan`   -- (stub) partially execute a (sub)plan, appending
-                             observed per-operator stats to the results store
-
-The agent's job, each run, is to look at a plan + the observed-execution data,
-*write a `CostModel` class in python*, install it, apply it, and (optionally)
-gather more observations by partially executing subplans and then refine the
-model — closing the estimate → observe → update loop.
-
-Dependencies: only `local_python_executor.py` (you already have it) and an LLM
-client. `palimpzest` is imported lazily/guarded — the agent operates on real
-`PhysicalPlan` / `PhysicalOperator` objects when available, but the harness only
-relies on a tiny duck-typed surface (iterate operators; read a few attributes)
-so you can also drive it with the stand-ins in `demo.py`.
-"""
-
 from __future__ import annotations
 
 import inspect
 import json
+import os
+import pathlib
 import re
 import textwrap
 from abc import ABC, abstractmethod
@@ -77,17 +41,16 @@ if _src_dir not in _sys.path:
     _sys.path.insert(0, _src_dir)
 
 try:
-    from scenario.movie.evaluation.evaluate import MovieEvaluator as _MovieEvaluator
-    _HAVE_EVALUATOR = True
-    print("[cost_model_agent] MovieEvaluator imported OK")
-except Exception as _e:
-    _MovieEvaluator = None  # type: ignore
-    _HAVE_EVALUATOR = False
-    print(f"[cost_model_agent] MovieEvaluator import failed: {type(_e).__name__}: {_e}")
+    from agent_cost_model.quality_evaluator import QualityEvaluator as _QualityEvaluator
+except ImportError:
+    try:
+        from quality_evaluator import QualityEvaluator as _QualityEvaluator  # type: ignore
+    except ImportError:
+        _QualityEvaluator = None  # type: ignore
 
 
 # ===========================================================================
-# Errors (local, tiny — we don't pull in skunk.errors)
+# Errors
 # ===========================================================================
 class ParseError(Exception):
     """The model's reply was not a single valid fenced block."""
@@ -115,7 +78,7 @@ class StepFailed(Exception):
 # Protocol however you like; `OpenRouterClient` below is the default.
 # ===========================================================================
 class LLMClient(Protocol):
-    def generate(self, system: str, messages: list[dict]) -> tuple[str, str | None]: ...
+    def generate(self, system: str, messages: list[dict]) -> Any: ...
 
 
 class OpenRouterClient:
@@ -145,12 +108,54 @@ class OpenRouterClient:
         self.model = model
         self.temperature = temperature
         self.reasoning_effort = reasoning_effort
+        self.total_cost_usd = 0.0
         self._client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key or os.environ["OPENROUTER_API_KEY"],
         )
 
-    def generate(self, system: str, messages: list[dict]) -> tuple[str, str | None]:
+    @staticmethod
+    def _extract_cost_usd(resp: Any) -> float:
+        """Best-effort extraction of provider-reported dollar cost from a chat response."""
+        candidates = []
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            candidates.extend([
+                getattr(usage, "cost", None),
+                getattr(usage, "total_cost", None),
+                getattr(usage, "estimated_cost", None),
+            ])
+            usage_extra = getattr(usage, "model_extra", None) or {}
+            if isinstance(usage_extra, dict):
+                candidates.extend([
+                    usage_extra.get("cost"),
+                    usage_extra.get("total_cost"),
+                    usage_extra.get("estimated_cost"),
+                ])
+        resp_extra = getattr(resp, "model_extra", None) or {}
+        if isinstance(resp_extra, dict):
+            candidates.extend([
+                resp_extra.get("cost"),
+                resp_extra.get("total_cost"),
+                resp_extra.get("estimated_cost"),
+            ])
+            usage_extra = resp_extra.get("usage")
+            if isinstance(usage_extra, dict):
+                candidates.extend([
+                    usage_extra.get("cost"),
+                    usage_extra.get("total_cost"),
+                    usage_extra.get("estimated_cost"),
+                ])
+
+        for value in candidates:
+            try:
+                if value is not None:
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    def generate(self, system: str, messages: list[dict]) -> tuple[str, str | None, dict[str, Any]]:
         msgs = [{"role": "system", "content": system}, *messages]
         extra_body: dict = {}
         if self.reasoning_effort:
@@ -164,7 +169,9 @@ class OpenRouterClient:
         msg = resp.choices[0].message
         content = msg.content or ""
         reasoning = getattr(msg, "reasoning", None) or (getattr(msg, "model_extra", None) or {}).get("reasoning")
-        return content, reasoning
+        cost_usd = self._extract_cost_usd(resp)
+        self.total_cost_usd += cost_usd
+        return content, reasoning, {"cost_usd": cost_usd}
 
 
 # ===========================================================================
@@ -252,6 +259,36 @@ def describe_operator(op: Any) -> dict:
     }
 
 
+def _normalize_plan_df(
+    df: "pd.DataFrame",
+    use_case: str,
+    query_id: int,
+) -> "pd.DataFrame":
+    """Apply use-case/query-specific column normalization for evaluator compatibility."""
+    if use_case == "ecomm":
+        if query_id == 4:
+            df = df.rename(columns={"prod_id": "id"})
+        elif query_id == 11:
+            if df.shape[1] >= 4:
+                df["id"] = df.iloc[:, :4].astype(str).agg("-".join, axis=1)
+                df = df[["id"]]
+        elif query_id == 12:
+            if df.shape[1] >= 3:
+                import json as _json
+                df["id"] = df.iloc[:, :3].apply(
+                    lambda r: _json.dumps(
+                        {"id": int(r.iloc[0]), "brand": r.iloc[1], "category": r.iloc[2]},
+                        separators=(",", ":"),
+                    ),
+                    axis=1,
+                )
+                df = df[["id"]]
+        elif query_id == 13:
+            df = df.rename(columns={"prod_id": "id"})
+            df = df[["id"]] if "id" in df.columns else df
+    return df
+
+
 # ===========================================================================
 # Observed-execution results store
 # ===========================================================================
@@ -282,12 +319,16 @@ class ResultsStore:
         self.rows.extend(new_rows)
         return len(new_rows)
 
+    _LARGE_COLS = frozenset({"op_samples", "plan_str"})
+
     @property
     def df(self):
-        """pandas view (requires pandas). Use `.rows` if you don't have pandas."""
+        """pandas view (requires pandas). Use `.rows` if you don't have pandas.
+        Large blob columns (op_samples, plan_str) are excluded — use get_op_samples() instead."""
         import pandas as pd
 
-        return pd.DataFrame(self.rows)
+        rows = [{k: v for k, v in r.items() if k not in self._LARGE_COLS} for r in self.rows]
+        return pd.DataFrame(rows)
 
     def summary(self) -> dict:
         """Counts + mean cost/latency per op_type — a quick orientation aid."""
@@ -346,6 +387,7 @@ class CostModelRegistry:
         return "\n".join(lines)
 
 
+
 # ===========================================================================
 # Tools
 # ===========================================================================
@@ -357,23 +399,6 @@ class Tool(ABC):
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
 
-# class InspectPlanTool(Tool):
-#     name = "inspect_plan"
-#     doc = """\
-# ### inspect_plan(plan)
-# Return a structured view of a physical (sub)plan: the list of its operators in
-# execution order, each with `op_id`, `op_type`, `attributes`.
-# Use this first to learn the shape of a plan before modeling it.
-
-# ```python
-# inspect_plan(plans["p1"])
-# ```"""
-
-#     def __call__(self, plan: Any) -> dict:
-#         ops = [describe_operator(op) for op in iter_operators(plan)]
-#         return {"n_operators": len(ops), "operators": ops}
-
-
 class EstimatePlanCostTool(Tool):
     name = "estimate_plan_cost"
     doc = """\
@@ -381,6 +406,9 @@ class EstimatePlanCostTool(Tool):
 Apply the CURRENTLY INSTALLED cost model to a physical (sub)plan and return its
 `PlanCostEstimate` (dollar cost, latency seconds, optional quality). Errors if
 you have not installed a cost model yet (do that with `update_cost_model`).
+Note: estimates may not accurately reflect absolute execution costs, but provide
+a good relative signal for comparing candidate plans. Use this before executing
+to prioritize which plans are worth running.
 
 ```python
 estimate_plan_cost(plans["p1"])
@@ -404,6 +432,89 @@ estimate_plan_cost(plans["p1"])
         return est
 
 
+class ComparePlanCostsTool(Tool):
+    name = "compare_plan_costs"
+    doc = """\
+### compare_plan_costs(plan_names)
+Estimate cost/latency for a list of NEW candidate plans using the CURRENTLY INSTALLED
+cost model. ALL previously written plans (executed or not) are automatically included
+for comparison. For executed plans, the actual observed cost/latency/quality are shown
+alongside the estimate. Returns a table sorted by estimated cost.
+Use this to rank candidate plans before deciding which to execute.
+Errors if no cost model is installed yet.
+
+```python
+compare_plan_costs(["p3", "p4", "p5"])
+# All previously written plans (e.g., p1, p2) are automatically included in the output.
+```"""
+
+    def __init__(self, registry: "CostModelRegistry", plans: dict, plan_results: "ResultsStore") -> None:
+        self._registry = registry
+        self._plans = plans
+        self._plan_results = plan_results
+
+    def __call__(self, plan_names: list) -> str:
+        model = self._registry.current()
+
+        actuals: dict[str, dict] = {}
+        for row in self._plan_results.rows:
+            name = row.get("plan_name")
+            if name:
+                actuals[name] = row
+
+        # Combine: new candidates + all written plans (executed or not), deduplicated
+        all_names = list(plan_names)
+        for written_name in self._plans:
+            if written_name not in all_names:
+                all_names.append(written_name)
+
+        rows = []
+        errors = []
+        for name in all_names:
+            plan = self._plans.get(name)
+            if plan is None:
+                errors.append(f"  {name}: not found in plans dict (skipped)")
+                continue
+            try:
+                est = model.estimate_plan(plan)
+                if isinstance(est, dict):
+                    est = PlanCostEstimate(**est)
+            except Exception as e:
+                errors.append(f"  {name}: estimation failed — {e}")
+                continue
+            actual = actuals.get(name, {})
+            is_new = name in plan_names
+            rows.append({
+                "plan_name": name,
+                "is_new": is_new,
+                "est_cost": est.cost,
+                "est_latency": est.time,
+                "actual_cost": actual.get("cost_usd"),
+                "actual_latency": actual.get("latency_s"),
+                "actual_quality": actual.get("quality"),
+            })
+
+        rows.sort(key=lambda r: (r["est_cost"] is None, r["est_cost"] or 0.0))
+
+        def fmt(v, fmt_str=".6f"):
+            return "—" if v is None else format(float(v), fmt_str)
+
+        header = f"{'plan':<12} {'new?':<6} {'est_cost':>12} {'est_latency':>12} {'actual_cost':>12} {'actual_latency':>14} {'actual_quality':>14}"
+        sep = "-" * len(header)
+        lines = [header, sep]
+        for r in rows:
+            new_marker = "yes" if r["is_new"] else "no"
+            lines.append(
+                f"{r['plan_name']:<12} {new_marker:<6} {fmt(r['est_cost']):>12} {fmt(r['est_latency']):>12} "
+                f"{fmt(r['actual_cost']):>12} {fmt(r['actual_latency']):>14} {fmt(r['actual_quality'], '.3f'):>14}"
+            )
+        if errors:
+            lines.append("\nErrors:")
+            lines.extend(errors)
+        lines.append("\n(Sorted by estimated cost. All written plans included automatically. Absolute values may be inaccurate; use for relative comparison.)")
+        return "\n".join(lines)
+
+
 class UpdateCostModelTool(Tool):
     name = "update_cost_model"
     doc = """\
@@ -414,6 +525,7 @@ instantiated for you) OR an instance you constructed. The model must define
 a `op_results` or `plan_results` argument, the observed-results store is passed to it automatically,
 so you can fit coefficients from the data. use `iter_operators(plan)` to access
 the operators in the plan in topological order.
+Optionally, use get_op_type(op) (e.g. 'sem_filter'), get_op_model(op) (e.g. 'google/gemini-2.5-flash-lite'), and describe_operator(op) to inspect each operator.
 Returns the new version number.
 
 ```python
@@ -541,7 +653,7 @@ class ListFilesTool(Tool):
     name = "list_files"
     doc = """\
 ### list_files()
-List all CSV files available in the data directory.
+List all items in the data directory, showing whether each is a file or folder.
 
 ```python
 list_files()
@@ -552,8 +664,11 @@ list_files()
         self._data_dir = pathlib.Path(data_dir)
 
     def __call__(self) -> str:
-        files = sorted(f.name for f in self._data_dir.iterdir() if f.suffix == ".csv")
-        return "Available files: " + ", ".join(files)
+        lines = []
+        for p in sorted(self._data_dir.iterdir()):
+            kind = "dir" if p.is_dir() else "file"
+            lines.append(f"  [{kind}] {p.name}")
+        return "Data directory contents:\n" + "\n".join(lines)
 
 
 class ExploreSchemaT(Tool):
@@ -597,69 +712,84 @@ explore_sample("Reviews.csv", n=3)
         return f"{filename} sample ({n} rows):\n{df.to_string(index=False)}"
 
 
+class GetOpSamplesTool(Tool):
+    name = "get_op_samples"
+    doc = """\
+### get_op_samples(plan_name, op_name=None, n=3)
+Retrieve sample (input, output) pairs for an executed plan from `plan_results`.
+Optionally scope to a single operator with `op_name` (e.g. "p1_op1").
+Returns at most `n` samples per operator.
+
+```python
+get_op_samples("p1")                  # all operators, 3 samples each
+get_op_samples("p1", "p1_op2", n=5)  # just op2, up to 5 samples
+```"""
+
+    def __init__(self, plan_results: ResultsStore) -> None:
+        self._plan_results = plan_results
+
+    def __call__(self, plan_name: str, op_name: str | None = None, n: int = 3) -> str:
+        row = next((r for r in self._plan_results.rows if r.get("plan_name") == plan_name), None)
+        if row is None:
+            available = [r.get("plan_name") for r in self._plan_results.rows]
+            return f"No executed plan named {plan_name!r}. Available: {available}"
+        samples = row.get("op_samples", {})
+        if not samples:
+            return f"No op_samples recorded for plan {plan_name!r}."
+        if op_name is not None:
+            if op_name not in samples:
+                return f"No operator {op_name!r} in plan {plan_name!r}. Available: {list(samples)}"
+            samples = {op_name: samples[op_name]}
+        lines = []
+        for op, pairs in samples.items():
+            lines.append(f"{op} ({min(len(pairs), n)}/{len(pairs)} samples shown):")
+            for i, pair in enumerate(pairs[:n]):
+                lines.append(f"  [{i}] input:  {pair['input']}")
+                lines.append(f"       output: {pair['output']}")
+        return "\n".join(lines)
+
+
 class WritePlanTool(Tool):
     name = "write_plan"
     doc = """\
-### write_plan(code, name)
+### write_plan(code, name, description="")
 Build and store a physical query plan WITHOUT executing it. `code` is a Python
 string that constructs a PhysicalPipeline and returns it as its last expression —
 do NOT call `.run()` in the plan code; `execute_plan` handles execution.
-`name` is the plan identifier you choose (e.g. "p1").
+`name` is the plan identifier you choose (e.g. "p1"). `description` is a short
+high-level label of the plan and the optimizations it embodies
+(e.g. "cheap sem_filter on truncated text, then sem_filter on image") — it is
+shown back to you in cost/estimate tables and helps you compare optimization ideas.
 
-After this call, `plans[name]` holds the built pipeline so you can immediately call
-`estimate_plan_cost(plans[name])` for a pre-execution cost estimate.
+After this call, `plans[name]["plan"]` holds the built pipeline and
+`plans[name]["description"]` holds your label.
 Use the load_data(filename) function to read CSVs from the data directory in your plan code.
 
 ```python
 write_plan(\"\"\"
-pipeline = PhysicalPipeline(plan_name, "Emails.csv", load_data("Emails.csv"))
+pipeline = PhysicalPipeline(plan_name, "emails", load_data("Emails.csv"))
 pipeline.sem_filter("this email quotes someone outside of the the sender's company", model=pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE)
 pipeline.project(["emailId"])
 pipeline.limit(5)
 pipeline
-\"\"\", "p1")
+\"\"\", "p1", description="baseline: single cheap sem_filter on full text")
 # `plan_name` is automatically set to the name you pass (here "p1")
-# plans["p1"] now holds the built pipeline — call estimate_plan_cost(plans["p1"])
+# plans["p1"]["plan"] now holds the built pipeline
 ```"""
 
-    def __init__(self, plan_codes: dict, plans: dict, data_dir: str) -> None:
-        import pathlib
+    def __init__(self, plan_codes: dict, plans: dict, executor: Any) -> None:
         self._plan_codes = plan_codes
         self._plans = plans
-        self._data_dir = pathlib.Path(data_dir)
+        self._executor = executor
 
-    def __call__(self, code: str, plan_name: str) -> dict:
-        import pandas as pd
-
+    def __call__(self, code: str, plan_name: str, description: str = "") -> dict:
         try:
             from agent.physical_pipeline import PhysicalPipeline
         except ImportError:
             from physical_pipeline import PhysicalPipeline  # type: ignore
-        try:
-            import palimpzest as pz
-        except ImportError as exc:
-            raise ImportError("palimpzest is required to build plans") from exc
 
-        from local_python_executor import LocalPythonExecutor
-
-        data_dir = self._data_dir
-
-        def load_data(filename: str) -> pd.DataFrame:
-            return pd.read_csv(data_dir / filename)
-
-        build_executor = LocalPythonExecutor(
-            additional_authorized_imports=["pandas", "palimpzest"],
-        )
-        build_executor.send_tools({})
-        build_executor.send_variables({
-            "PhysicalPipeline": PhysicalPipeline,
-            "pz": pz,
-            "pd": pd,
-            "load_data": load_data,
-            "plan_name": plan_name,
-        })
-
-        exec_result = build_executor(code)
+        self._executor.send_variables({"plan_name": plan_name})
+        exec_result = self._executor(code)
         pipeline = exec_result.output
         if not isinstance(pipeline, PhysicalPipeline):
             raise TypeError(
@@ -668,22 +798,28 @@ pipeline
             )
 
         self._plan_codes[plan_name] = code
-        self._plans[plan_name] = pipeline
-        return {"plan_name": plan_name, "total_plans": len(self._plan_codes)} #TODO: total plan count is kind of useless
+        self._plans[plan_name] = {"plan": pipeline, "description": description}
+        return {"plan_name": plan_name, "description": description, "total_plans": len(self._plan_codes)}
 
 
 class ExecutePlanTool(Tool):
     name = "execute_plan"
     doc = """\
 ### execute_plan(name)
-Execute the stored plan `name` in a sandboxed environment. Plan-level and operator-level
-quality, latency, cost, and token usage are printed and appended to `plan_results` and `op_results`, respectively.
-After execution, `plans[name]` holds the PhysicalPipeline.
+Execute the stored plan `name` on a reproducible sample of records. Plan-level and
+operator-level quality, latency, cost, and token usage are appended to `plan_results`
+and `op_results`, respectively. After execution, `plans[name]` holds the PhysicalPipeline.
 
-Returns `plan_results` and `op_results` respectively
-The stats are: cost_usd, latency_s, input_tokens, output_tokens, quality, and any other quality metrics the evaluator produces
+Returns a compact summary dict with plan stats and per-operator stats. Key fields:
+- `quality`: 0–1 overall plan quality evaluated by an oracle. Higher is better.
+  Treat oracle quality scores as ground truth.
+- `per_sem_op_quality`: per-semantic-operator quality (0–1). Use to diagnose
+  which operator is the bottleneck.
+- `cost_usd`, `latency_s`, `input_tokens`, `output_tokens`: aggregated over all ops.
+To inspect accumulated results use `plan_results.df` and `op_results.df`.
+To view sample input/output pairs use `get_op_samples(plan_name)`.
 ```python
-p1_plan_results, p1_op_results = execute_plan("p1")
+execute_plan("p1")
 ```"""
 
     def __init__(
@@ -693,12 +829,10 @@ p1_plan_results, p1_op_results = execute_plan("p1")
         plan_results: ResultsStore,
         op_results: ResultsStore,
         use_case: str,
-        scale_factor: int,
         query_id: int,
         data_dir: str,
         agent_dir: str,
-        gt_dir: str,
-        raw_results_dir: str,
+        quality_evaluator: Any,
     ) -> None:
         import pathlib
 
@@ -707,23 +841,12 @@ p1_plan_results, p1_op_results = execute_plan("p1")
         self._op_results = op_results
         self._plan_results = plan_results
         self._use_case = use_case
-        self._scale_factor = scale_factor
         self._query_id = query_id
         self._data_dir = pathlib.Path(data_dir)
         self._agent_dir = agent_dir
-        self._gt_dir = pathlib.Path(gt_dir)
-        self._raw_results_dir = pathlib.Path(raw_results_dir) / agent_dir
-        # Build evaluator once (loads domain CSVs for the use_case)
-        self._evaluator = None
-        if _HAVE_EVALUATOR:
-            try:
-                self._evaluator = _MovieEvaluator(use_case, scale_factor, agent_dir)
-            except Exception as e:
-                print(f"[ExecutePlanTool] evaluator init failed: {type(e).__name__}: {e}")
+        self._quality_evaluator = quality_evaluator
 
     def __call__(self, plan_name: str) -> dict:
-        import dataclasses
-
         import pandas as pd
 
         pipeline = self._plans.get(plan_name)
@@ -733,51 +856,76 @@ p1_plan_results, p1_op_results = execute_plan("p1")
                 f"Available: {list(self._plans)}"
             )
 
-        result_collection, op_results, plan_results = pipeline.run() #TO DO: put this in local python executor
+        subset_path = pathlib.Path(f"agent_cost_model/datasubset/{self._use_case}/Q{self._query_id}_subset.csv")
+        plan_exec_error: Exception | None = None
+        per_op_list, plan_context = [], None
+        try:
+            per_op_list, plan_context = pipeline.run_subset(subset_cache_path=str(subset_path))
+        except Exception as e:
+            plan_exec_error = e
+            print(f"[execute_plan] plan execution failed for {plan_name}: {type(e).__name__}: {e}")
         self._plans[plan_name] = pipeline
 
-        # -- save raw query output CSV (mirrors GenericRunner.save_results) ---
-        results_df = result_collection.to_df()
-        self._raw_results_dir.mkdir(parents=True, exist_ok=True)
-        csv_path = self._raw_results_dir / f"Q{self._query_id}_{plan_name}.csv"
-        results_df.to_csv(csv_path, index=False)
-        print(f"[execute_plan] raw results → {csv_path}")
+        plan_output_df = pd.DataFrame(
+            plan_context.output_records if plan_context is not None else []
+        )
+        plan_output_df = _normalize_plan_df(plan_output_df, self._use_case, self._query_id)
 
-        # get plan quality
-        quality_metric = "unknown"
-        if self._evaluator is None:
-            print(f"[execute_plan] evaluator not available — skipping evaluation for {plan_name}")
-        else:
+        quality_result = None
+        if self._quality_evaluator is not None:
             try:
-                gt_path = self._gt_dir / f"Q{self._query_id}.csv"
-                gt_df = pd.read_csv(gt_path)
-                qm = self._evaluator._evaluate_single_query(
-                    self._query_id, results_df, gt_df
+                # Pass an empty SubsetExecutionContext when the plan failed so the oracle
+                # still runs (populating _canonical_oracle_df for later plans).
+                if plan_context is None:
+                    from agent.physical_pipeline import SubsetExecutionContext
+                    plan_context = SubsetExecutionContext(
+                        sampled_records=[], output_records=[],
+                        per_sem_op_info={}, has_join=False, right_sampled_records=None,
+                    )
+                quality_result = self._quality_evaluator.evaluate(
+                    pipeline, plan_name, plan_context, plan_output_df
                 )
-                # Flatten quality fields directly into the row (no nested dict)
-                # so results.df has clean flat columns.
-                for k, v in dataclasses.asdict(qm).items():
-                    plan_results[k] = v
-                qm_type = type(qm).__name__
-                if "Retrieval" in qm_type:
-                    quality_metric = "f1_score"
-                elif "Aggregation" in qm_type:
-                    quality_metric = "relative_error"
-                elif "Rank" in qm_type:
-                    quality_metric = "spearman_correlation"
-                print(f"[execute_plan] evaluation succeeded for {plan_name}: quality_metric={quality_metric}")
             except Exception as e:
-                print(f"[execute_plan] evaluation failed for {plan_name}: {type(e).__name__}: {e}")
-                plan_results["eval_error"] = str(e)
-    
-        if quality_metric in plan_results:
-            if quality_metric == "relative_error": plan_results["quality"] = 1- plan_results[quality_metric]
-            else: plan_results['quality'] = plan_results[quality_metric]
-        plan_results['plan_name'] = plan_name
-        self._plan_results.append([plan_results])
-        self._op_results.append(op_results)
-        print(plan_results, op_results)
-        return self._plan_results, self._op_results
+                print(f"[execute_plan] quality evaluation failed for {plan_name}: {type(e).__name__}: {e}")
+
+        if plan_exec_error is not None:
+            raise RuntimeError(
+                f"Plan {plan_name!r} execution failed: {type(plan_exec_error).__name__}: {plan_exec_error}"
+            )
+
+        # Build op_samples for GetOpSamplesTool compatibility
+        op_samples: dict[str, list] = {}
+        for _stage_idx, info in plan_context.per_sem_op_info.items():
+            op_n = info["op_name"]
+            raw_samples = info.get("samples", [])
+            op_samples[op_n] = [
+                {"input": str(inp), "output": str(out) if out is not None else None}
+                for inp, out in raw_samples[:5]
+            ]
+
+        total_cost = sum(e.get("cost_usd", 0) for e in per_op_list)
+        total_latency = sum(e.get("latency_s", 0) for e in per_op_list)
+        total_in_tok = sum(e.get("input_tokens", 0) for e in per_op_list)
+        total_out_tok = sum(e.get("output_tokens", 0) for e in per_op_list)
+
+        plan_row = {
+            "plan_name": plan_name,
+            "plan_str": str(pipeline),
+            "cost_usd": total_cost,
+            "latency_s": total_latency,
+            "input_tokens": total_in_tok,
+            "output_tokens": total_out_tok,
+            "quality": quality_result.quality if quality_result is not None else float("nan"),
+            "per_sem_op_quality": (
+                quality_result.per_sem_op_quality if quality_result is not None else {}
+            ),
+            "op_samples": op_samples,
+        }
+        self._plan_results.append([plan_row])
+        self._op_results.append(per_op_list)
+
+        plan_summary = {k: v for k, v in plan_row.items() if k not in ("op_samples", "plan_str")}
+        return {"plan_summary": plan_summary, "op_summary": per_op_list}
 
 
 # ===========================================================================
@@ -810,17 +958,6 @@ def _parse_step(text: str) -> _Step:
     except json.JSONDecodeError as e:
         raise ParseError(raw=text, detail=f"final-answer JSON was malformed — {e}") from e
 
-
-# _DEFAULT_PZ_OPERATORS = {
-#     "sem_filter": "ds.sem_filter(filter: str) — Semantically filter rows where `filter` is true.",
-#     "sem_map": "ds.sem_map(cols: list[dict]) — Add new LLM-derived columns. Each dict has 'name', 'type', 'description'.",
-#     "sem_join": "ds.sem_join(other, condition: str) — Semantically join two datasets where `condition` holds. Produces schema names 'name' and 'name_right' for sem_map columns from left and right datasets.",
-#     "filter": "ds.filter(fn: Callable) — Exact (non-semantic) row filter using a lambda.",
-#     "project": "ds.project(columns: list[str]) — Select a subset of columns.",
-#     "limit": "ds.limit(n: int) — Keep at most n rows.",
-#     "groupby": "ds.groupby(GroupBySig(group_by_fields, agg_funcs, agg_fields)) — Group and aggregate. Produces schema name 'agg_func(agg_field)', e.g. 'count(reviewId)' or 'average(score)'.",
-# }
-
 _PHYSICAL_SEMANTIC_OPERATORS = {
     "sem_filter": "pipeline.sem_filter(condition: str, model: pz.Mode) — LLM filter; keeps rows where condition is true.",
     "sem_map": "pipeline.sem_map(cols: list[dict], model: pz.Model) — Add LLM-derived columns. col is list of dict {'name': str, 'type': type, 'description': str}",
@@ -829,31 +966,34 @@ _PHYSICAL_SEMANTIC_OPERATORS = {
 
 _PHYSICAL_NONSEMANTIC_OPERATORS = {
     "filter": "pipeline.filter(fn: Callable[[dict], bool]) — Exact row filter using a Python callable.",
+    "map": "pipeline.map(fn: Callable[[dict], dict], cols: list[dict]) - Exact row map using a Python callable to add new columns. col is list of dict {'name': str, 'type': type, 'description': str}",
     "project": "pipeline.project(cols: list[str]) — Select a subset of columns.",
     "limit": "pipeline.limit(n: int) — Keep at most n rows.",
     "groupby": "pipeline.groupby(group_by_fields: list[str], agg_funcs: list[str], agg_fields: list[str]) — Group and aggregate. Produces schema name 'agg_func(agg_field)', e.g. 'count(reviewId)' or 'average(score)'.",
 }
-_AVAILABLE_MODELS = [f"pz.Model.{m.name}" for m in __import__("palimpzest").Model]
+_AVAILABLE_MODELS_TEXT = (pathlib.Path(__file__).parent / "available_models.txt").read_text()
 
-# - `PlanCostEstimate`: dataclass(cost, time, quality=None, details={{}}) — what your cost model returns
-# - `CostModel`       : optional base class for your cost model
-# - `iter_operators`, `get_op_type`, `get_op_id`, `get_op_model`, `describe_operator` : plan/op helpers
 _SYSTEM_TEMPLATE = """\
 {briefing}
 
-## HARD RULE — No data snooping or hardcoded indexes/phrases
+## HARD RULES
+
+### No data snooping or hardcoded indexes/phrases
 `explore_sample` and `explore_schema` exist to help you understand **schema and format only**.
 You MUST NOT use sample rows to identify specific records and then hardcode their IDs, row
 indexes, or literal field values into a plan.  Every filter predicate in your plan must be a
 **general condition** that could correctly classify records it has never seen — for example
 `sem_filter("the text is clearly positive")` or `filter(lambda row: row["name"] == "John")`.
-Writing plans like `filter(lambda row: row["id"] in [3, 17, 42])` or
-`filter(lambda row: "good" in row["text"])` to cherry-pick rows you already know about is **cheating**
-and will produce meaningless results.
+Writing plans like `filter(lambda row: row["id"] in [3, 17, 42])`,
+`filter(lambda row: "good" in row["text"])`, or using excessive keyword search to cherry-pick rows
+is **cheating** and will produce meaningless results. Rely on semantic operators instead of constructing
+complex keyword/regex/specific row selection.
 Furthermore, physical plans should only involve trees of the given semantic and non-semantic operators.
 Do not construct your own methods, rely on these operators only.
 If your plan contains any hardcoded record IDs or values you copied from `explore_sample`
 output, rewrite it before calling `execute_plan`.
+
+{estimate_rule}
 
 ## Tools (already imported into your python sandbox)
 
@@ -870,15 +1010,27 @@ operator should only be used at the end of a plan.
 Semantic operators — require a model= argument:
 All semantic operators have an optional "depends_on: list[str] | None" argument,
 which is a list of field names to pass in for the LLM call (instead of the full input schema).
+Using `depends_on` will reduce the LLM input and help reduce cost.
 {physical_sem_ops}
 
 Non-semantic operators — no model argument:
 {physical_nonsem_ops}
 
 ## Available Models:
+All models listed support both text and image inputs. Use `add_image_data` with a `depends_on`
+that includes the image column to pass images to any model.
+Within each tier, cheaper options are listed first. Prefer the cheaper models unless improving
+quality requires a more expensive model.
 {available_models}
 
 ## Also available in your sandbox (no import needed)
+- `load_data(filename)` : read a CSV from the data directory and return a DataFrame.
+    df = load_data("items.csv")
+- `add_image_data(pipeline: PhysicalPipeline, col_name: str)` : returns a `PhysicalPipeline` with
+    an added `col_name` column of type `pz.ImageFilepath` to `pipeline` that contains the path to each row's image file.
+   Whenever a semantic operator depends on a column with type `pz.ImageFilepath`, it will
+   encode it as a base64 image to send to the LLM as a vision input.
+
 - `plans`           : dict[str, plan] — physical plans; populated by write_plan (updated by execute_plan)
 - `plan_codes`      : dict[str, str] — code strings stored by write_plan (keys = plan names)
 - `plan_results`    : the observed-execution store (`plan_results.rows`, `plan_results.df`)
@@ -902,34 +1054,47 @@ class CostModelAgent:
         dollars and seconds.
 
         Your goal is to write physical plans, observe cost/latency/quality,
-        and converge on the best cost-quality trade-off. Do not hard code the plan
+        and converge on the best cost-quality trade-off. Do not hard code the plan.
 
         Suggested workflow:
-        1. Explore the data: call `list_files()` to see available CSVs,
+        1. Explore the data: call `list_files()` to see available CSVs and folders,
            `explore_schema(filename)` and `explore_sample(filename)` to understand each table.
         2. Write a plan with `write_plan(code, name)`.
            - `code` builds a PhysicalPipeline instance and returns it as the last expression.
-           - `name` is a string identifier you choose, e.g. "p1".
+           - `name` is a string identifier you choose, e.g. "p1", "p2", "p3", ...
+             Use a NEW unique name for each new plan — never reuse a name for a different plan.
            - NEVER hardcode row IDs, indexes, or specific field values you found by browsing
              data. Use `sem_filter` / `sem_map` with natural-language conditions or schema-level
              predicates (e.g. `filter(lambda row: row["score"] >= 4)`). Plans containing
              hardcoded record IDs or values copied from `explore_sample` output are invalid.
-           - `plans[name]` is populated immediately with the newly written PhysicalPipeline instance
+           - `plans[name]` is populated immediately with the newly written PhysicalPipeline instance.
         3. Execute with `execute_plan(name)`:
-           - Appends plan-level stats to `plan_results` (cost_usd, latency_s, tokens, quality vs. ground truth).
+           - Runs on a reproducible sample of records (same records across all plans).
+           - Appends plan-level stats to `plan_results` (cost_usd, latency_s, tokens, quality).
            - Appends per-operator stats to `op_results` (cost_usd, latency_s, tokens, num_records per op).
            - After execution, `plans[name]` is updated with the executed PhysicalPipeline.
-        4. Evaluate execution performance with `plan_results.df` and `op_results.df`. `quality` column depends on query type:
-           retrieval → f1_score
-           aggregation → relative_error
-           ranking → spearman_correlation
-        6. Based on `plan_results.df` and `op_results.df`, write a new plan that has higher quality or lower cost/latency
-           and repeat from step 2.
-
-        Note: performance results may have variance — gather several runs before concluding.
-        Do not conclude the best plan too early -- use the allocated steps to better understand the
-        cost, latency, and quality tradeoff on a plan and per-operator level. Consider various model choices for each operator,
-        using cheaper/faster models for easier operators, and improving plan design.""")
+        4. Evaluate with `plan_results.df` and `op_results.df`:
+           - `quality`: 0–1 overall plan quality evaluated by an oracle. Higher is better.
+             Treat oracle quality scores as ground truth — do not try to replicate or
+             reverse-engineer the oracle; simply observe and optimize.
+           - `per_sem_op_quality`: per-semantic-operator quality (0–1). Use to diagnose
+             which operator is the bottleneck.
+        5. Based on `plan_results.df` and `op_results.df`, write a new plan that has higher
+           quality or lower cost/latency and repeat from step 2.
+                                       
+        Consider the following impacts on plan cost and latency:
+        - Cardinality: costs scale non-linearly — a selective filter reduces cardinality into downstream
+          operators.
+        - Token count: LLM cost scales with input/output token count, not just record count.
+          `op_results.df` includes `input_tokens` and `output_tokens`.
+        - Column selection: the `depends_on=[...]` parameter on `sem_filter`/`sem_map` controls
+          which columns enter the LLM context. Narrowing `depends_on` reduces input tokens
+          and is a key cost lever to model and exploit.
+        - Images: image inputs cost orders of magnitude more than text tokens. Avoiding `add_image_data`
+          or excluding the image column from `depends_on` when not needed drastically cuts cost.
+        - Text truncation: long text fields can be truncated with a `map` operator before semantic
+          ops (e.g., `map(lambda row: {"text": row["text"][:500]}, cols=[...])`), reducing input tokens.
+        """)
 
     sampleCost_briefing = textwrap.dedent("""\
         You are a query plan engineer optimizing physical plans for an optimized deep-research query system.
@@ -940,15 +1105,16 @@ class CostModelAgent:
         use it to compare plan variants before deciding which ones to execute.
 
         Your goal is to write physical plans, observe cost/latency/quality,
-        and converge on the best cost-quality trade-off. Do not hard code the plan
+        and converge on the best cost-quality trade-off. Do not hard code the plan.
 
         Suggested workflow:
         To get initial data and performance traces:
-        1. Explore the data: call `list_files()` to see available CSVs,
+        1. Explore the data: call `list_files()` to see available CSVs and folders,
            `explore_schema(filename)` and `explore_sample(filename)` to understand each table.
         2. Write a plan with `write_plan(code, name)`.
            - `code` builds a PhysicalPipeline instance and returns it as the last expression.
-           - `name` is a string identifier you choose, e.g. "p1".
+           - `name` is a string identifier you choose, e.g. "p1", "p2", "p3", ...
+             Use a NEW unique name for each new plan — never reuse a name for a different plan.
            - NEVER hardcode row IDs, indexes, or specific field values you found by browsing
              data. Use `sem_filter` / `sem_map` with natural-language conditions or schema-level
              predicates (e.g. `filter(lambda row: row["score"] >= 4)`). Plans containing
@@ -956,79 +1122,108 @@ class CostModelAgent:
            - `plans[name]` is populated immediately — call `estimate_plan_cost(plans[name])`
              right after `write_plan` to get a pre-execution cost estimate.
         3. Execute with `execute_plan(name)`:
-           - Appends plan-level stats to `plan_results` (cost_usd, latency_s, tokens, quality vs. ground truth).
+           - Runs on a reproducible sample of records (same records across all plans).
+           - Appends plan-level stats to `plan_results` (cost_usd, latency_s, tokens, quality).
            - Appends per-operator stats to `op_results` (cost_usd, latency_s, tokens, num_records per op).
            - After execution, `plans[name]` is updated with the executed PhysicalPipeline.
-        4. Evaluate execution performance with `plan_results.df` and `op_results.df`. `quality` column depends on query type:
-           retrieval → f1_score
-           aggregation → relative_error
-           ranking → spearman_correlation
+        4. Evaluate with `plan_results.df` and `op_results.df`:
+           - `quality`: 0–1 overall plan quality evaluated by an oracle. Higher is better.
+             Treat oracle quality scores as ground truth — do not try to replicate or
+             reverse-engineer the oracle; simply observe and optimize.
+           - `per_sem_op_quality`: per-semantic-operator quality (0–1). Use to diagnose
+             which operator is the bottleneck.
 
         Then, iteratively write new plans, estimate their cost, and execute the most promising ones:
-        - Use `plan_results.df` and `op_results.df` to identify which quality and cost/latency trade-off for different operators and attribute choices
-            -- `plan_results.df` includes operator descriptions and input-output record pairs
+        - Use `plan_results.df` and `op_results.df` to identify quality and cost/latency trade-offs
+            -- `plan_results.df` includes operator descriptions; use `get_op_samples(plan_name)` to view input/output pairs
             -- `op_results.df` includes per-operator performances, operators are named by `name_op1`, `name_op2`, ...
-        - Always use `estimate_plan_cost(plans[name])` to get cost/latency estimates BEFORE executing the promising plans.
+        - Always use `estimate_plan_cost(plans[name])` to get cost/latency estimates BEFORE executing promising plans.
             -- the cost model averages past execution to get per-operator cost/latency estimates
             -- thus, only changing a few operators for each plan writing will produce more comparable estimations
-
-        Note: performance results may have variance — gather several runs before concluding.
-        Do not conclude the best plan too early -- use the allocated steps to better understand the
-        cost, latency, and quality tradeoff on a plan and per-operator level. Consider various model choices for each operator,
-        using cheaper/faster models for easier operators, and improving plan design.
         """)
 
     customCost_briefing = textwrap.dedent("""\
         You are a query plan engineer optimizing physical plans for an optimized deep-research query system.
         Physical query plans are trees of operators (semantic filters, maps, joins,
         aggregations, scans, projects). Some operators call LLMs and cost real
-        dollars and seconds. 
+        dollars and seconds.
 
-        Your goal is to design a cost model (cost and latency) to help determine better physical plans,
+        Your goal is to design a custom cost model (cost and latency) to guide iterative plan search,
         observe cost/latency/quality, and converge on the best cost/latency-quality trade-off.
         Do not hard code the plan.
 
-        Suggested workflow:
-        To get initial data and performance traces:
-        1. Explore the data: call `list_files()` to see available CSVs,
+        === Phase 1 — Bootstrap ===
+        1. Explore the data: call `list_files()` to see available CSVs and folders,
            `explore_schema(filename)` and `explore_sample(filename)` to understand each table.
-        2. Write a plan with `write_plan(code, name)`.
+        2. Write 1–2 baseline plans with `write_plan(code, name)` that capture meaningfully different
+           design approaches (e.g., one with a strong early filter, one without; one using a
+           capable model, one using a cheaper model).
            - `code` builds a PhysicalPipeline instance and returns it as the last expression.
-           - `name` is a string identifier you choose, e.g. "p1".
+           - `name` is a string identifier you choose, e.g. "p1", "p2", "p3", ...
+             Use a NEW unique name for each new plan — never reuse a name for a different plan.
            - NEVER hardcode row IDs, indexes, or specific field values you found by browsing
              data. Use `sem_filter` / `sem_map` with natural-language conditions or schema-level
              predicates (e.g. `filter(lambda row: row["score"] >= 4)`). Plans containing
              hardcoded record IDs or values copied from `explore_sample` output are invalid.
-           - `plans[name]` is populated immediately — call `estimate_plan_cost(plans[name])`
-             right after `write_plan` to get a pre-execution cost estimate.
-        3. Execute with `execute_plan(name)`:
-           - Appends plan-level stats to `plan_results` (cost_usd, latency_s, tokens, quality vs. ground truth).
+        3. Execute baseline plans with `execute_plan(name)`:
+           - Runs on a reproducible sample of records (same records across all plans).
+           - Appends plan-level stats to `plan_results` (cost_usd, latency_s, tokens, quality).
            - Appends per-operator stats to `op_results` (cost_usd, latency_s, tokens, num_records per op).
            - After execution, `plans[name]` is updated with the executed PhysicalPipeline.
-        4. Evaluate execution performance with `plan_results.df` and `op_results.df`. `quality` column depends on query type:
-           retrieval → f1_score
-           aggregation → relative_error
-           ranking → spearman_correlation
+        4. Evaluate with `plan_results.df` and `op_results.df`:
+           - `quality`: 0–1 overall plan quality evaluated by an oracle. Higher is better.
+             Treat oracle quality scores as ground truth — do not try to replicate or
+             reverse-engineer the oracle; simply observe and optimize.
+           - `per_sem_op_quality`: per-semantic-operator quality (0–1). Use to diagnose
+             which operator is the bottleneck.
+           - Use `get_op_samples(plan_name)` to inspect input/output pairs for an operator.
+        5. Design and install a cost model with `update_cost_model(YourClass, notes="v1: ...")`.
+           - If your class __init__ takes `op_results` or `plan_results`, they are passed automatically
+             so you can fit coefficients from the accumulated data inside __init__.
+           - You may call `update_cost_model` multiple times to refine the model across versions.
 
-        Then, design a cost model to help iteratively write new plans, estimate their cost, and execute the most promising ones:
-        - Use `plan_results.df` and `op_results.df` to identify which quality and cost/latency trade-off for different operators and attribute choices
-            -- `plan_results.df` includes operator descriptions and input-output record pairs
-            -- `op_results.df` includes per-operator performances, operators are named by `name_op1`, `name_op2`, ...
-        - Always use `estimate_plan_cost(plans[name])` to get cost/latency estimates BEFORE executing the promising plans.
-            -- the cost model averages past execution to get per-operator cost/latency estimates
-            -- thus, only changing a few operators for each plan writing will produce more comparable estimations
-        - When building your cost model, consider taking sample averages, grouping by operator types,
-            and utilizing information across plans and operators.
-        - Install your cost model by calling `update_cost_model(YourClass, notes="v1: ...")`.
-            If your class __init__ takes `op_results` or `plan_results`, they are passed automatically
-            so you can fit coefficients from the accumulated data inside __init__.
-            You may call `update_cost_model` multiple times to refine the model across versions. When results data is sparse, consider using
-            prior estimation of operator/plan cost and latency.
+        === Designing your cost model ===
+        Your cost model is a tool for RELATIVE comparison between candidate plans — the absolute
+        values may not accurately reflect actual execution costs, but the relative estimates should
+        guide which plans to prioritize for execution.
 
-        Note: performance results may have variance — gather several runs before concluding.
-        Do not conclude the best plan too early -- use the allocated steps to better understand the
-        cost, latency, and quality tradeoff on a plan and per-operator level. Consider various model choices for each operator,
-        using cheaper/faster models for easier operators, and improving plan design.
+        Cost scales with both record count AND record size. Consider the following:
+        - Cardinality: costs scale non-linearly — a selective filter reduces cardinality into downstream
+          operators. Use `num_passed/num_records` to estimate downstream cardinality.
+        - Token count: LLM cost scales with input/output token count, not just record count.
+          `op_results.df` includes `input_tokens` and `output_tokens` — use these (divided by
+          `num_records`) to get a per-record token cost proxy that captures actual record size.
+        - Column selection: the `depends_on=[...]` parameter on `sem_filter`/`sem_map` controls
+          which columns enter the LLM context. Narrowing `depends_on` reduces input tokens
+          and is a key cost lever to model and exploit.
+        - Images: image inputs cost orders of magnitude more than text tokens. Avoiding `add_image_data`
+          or excluding the image column from `depends_on` when not needed drastically cuts cost.
+        - Text truncation: long text fields can be truncated with a `map` operator before semantic
+          ops (e.g., `map(lambda row: {"text": row["text"][:500]}, cols=[...])`), reducing input tokens.
+        - When designing your cost model, use `input_tokens / num_records` as a per-record token
+          size signal alongside selectivity. You have full freedom to model cost scaling any way
+          you judge best — linear, step-function, cardinality-aware, or otherwise.
+        - When results data is sparse, consider using naive prior estimates for unseen operators.
+
+        === Phase 2 — Iteration cycles ===
+        Each cycle:
+        1. Decide what to improve: explicitly reason about ONE dimension to target — e.g., swap to
+           a cheaper/faster model for an operator, consolidate or split prompts, reorder operators
+           to push selective filters earlier, narrow `depends_on` to fewer columns, truncate long
+           text fields, remove images, change logical structure.
+        2. Write 2–4 candidate plans that each embody a specific targeted change. Use new unique names.
+        3. Call `compare_plan_costs([name1, name2, ...])` on ALL new candidates.
+           This tool automatically includes all previously executed plans in the output (with their
+           actual cost/latency/quality shown alongside estimates), so you can directly compare new
+           candidates against the plans you have already run.
+        4. Execute only the 1–2 most promising plans based on the cost/quality tradeoff from the
+           comparison — using what you already know about quality from previously executed plans
+           to judge whether a cheaper plan is likely to maintain acceptable quality.
+        5. Update the cost model if new observations reveal the model was systematically wrong.
+
+        Caveat: if a change is not well-captured by the cost model (e.g., a new operator type with
+        no prior observations, or a change that significantly alters output token counts), flag this
+        uncertainty and lean toward executing to gather data rather than purely trusting the estimate.
     """)
  
     execute_final_answer_doc = textwrap.dedent("""\
@@ -1058,29 +1253,38 @@ class CostModelAgent:
         self,
         llm: LLMClient,
         *,
-        data_dir: str = "dataset/movie",
+        data_dir: str = "dataset/use_case",
         agent_dir: str = "no_name",
+        use_case: str = "use_case",
         max_steps: int = 12,
         max_recover_retries: int = 1,
         context_budget_chars: int = 200_000,
         authorized_imports: list[str] | None = None,
         verbose: bool = True,
+        oracle_model: str = "openai/o4-mini",
+        oracle_reasoning_effort: str | None = "high",
     ) -> None:
         self.llm = llm
         self.agent_dir = agent_dir
+        self.use_case = use_case
         self.data_dir = data_dir
+        self.oracle_model = oracle_model
+        self.oracle_reasoning_effort = oracle_reasoning_effort
         self.max_steps = max_steps
         self.max_recover_retries = max_recover_retries
         self.context_budget_chars = context_budget_chars
         self.authorized_imports = authorized_imports or [
             "math", "statistics", "json", "collections", "itertools",
-            "pathlib", "pandas", "palimpzest"
+            "palimpzest"
         ]
         self.verbose = verbose
         # Rebuilt per run(); kept on the instance so callers can read it after.
         self.messages: list[dict] = []
         self.reasoning_steps: list[str | None] = []
         self.trajectory_steps: list[dict] = []
+        self.agent_cost_usd: float = 0.0
+        self.execution_cost_usd: float = 0.0
+        self.oracle_cost_usd: float = 0.0
 
     # -- logging -----------------------------------------------------------
     def _log(self, msg: str) -> None:
@@ -1094,21 +1298,26 @@ class CostModelAgent:
         import pandas as pd
         import pathlib
         data_path = pathlib.Path(query_info["data_dir"])
-        metrics_dir = data_path.parents[1] / "trajectory"
+        metrics_dir = data_path.parents[1] / "trajectory" / self.use_case
         metrics_dir.mkdir(parents=True, exist_ok=True)
-        out = metrics_dir / f"Q{query_info['query_id']}_{self.agent_dir}_trajectory.csv"
+        rc = query_info.get("runcount")
+        qkey = f"Q{query_info['query_id']}_{rc}" if rc is not None else f"Q{query_info['query_id']}"
+        out = metrics_dir / f"{qkey}_{self.agent_dir}_trajectory.csv"
         pd.DataFrame(self.trajectory_steps).to_csv(out, index=False)
         self._log(f"[run] trajectory → {out}")
 
     def _save_cost_model_codes(self, codes: dict, query_info: dict) -> None:
-        """Save all versioned cost model code strings to agent_cost_model/costModel/Q{id}.json."""
+        """Save all versioned cost model code strings to
+        agent_cost_model/costModel/{use_case}/{agent_dir}/Q{id}.json."""
         if not codes:
             return
         import json
         import pathlib
-        out_dir = pathlib.Path("agent_cost_model/costModel")
+        out_dir = pathlib.Path(f"agent_cost_model/costModel/{self.use_case}/{self.agent_dir}")
         out_dir.mkdir(parents=True, exist_ok=True)
-        out = out_dir / f"Q{query_info['query_id']}.json"
+        rc = query_info.get("runcount")
+        qkey = f"Q{query_info['query_id']}_{rc}" if rc is not None else f"Q{query_info['query_id']}"
+        out = out_dir / f"{qkey}.json"
         with open(out, "w") as f:
             json.dump(codes, f, indent=2)
         self._log(f"[run] cost model codes → {out}")
@@ -1121,15 +1330,21 @@ class CostModelAgent:
             return
         import pathlib
         data_path = pathlib.Path(query_info["data_dir"])
-        metrics_dir = data_path.parents[1] / "metrics"
+        metrics_dir = data_path.parents[1] / "metrics" / self.use_case
         metrics_dir.mkdir(parents=True, exist_ok=True)
-        out = metrics_dir / f"Q{query_info['query_id']}_{self.agent_dir}_results.csv"
+        rc = query_info.get("runcount")
+        qkey = f"Q{query_info['query_id']}_{rc}" if rc is not None else f"Q{query_info['query_id']}"
+        out = metrics_dir / f"{qkey}_{self.agent_dir}_results.csv"
         df = results.df
         df["use_case"] = query_info["use_case"]
         df["query_id"] = query_info["query_id"]
         best_name = (final_answer or {}).get("best_plan", {}).get("name")
         df["final_selected"] = df["plan_name"] == best_name if best_name else False
-        df = df[[col for col in df.columns if col not in ["plan_str", "op_samples"]]+["plan_str", "op_samples"]] #display long text at end
+        # re-attach large blob columns (stripped by results.df) and move them to the end
+        for col in ["plan_str", "op_samples"]:
+            if col not in df.columns:
+                df[col] = [r.get(col) for r in results.rows]
+        df = df[[col for col in df.columns if col not in ["plan_str", "op_samples"]] + ["plan_str", "op_samples"]]
         df.to_csv(out, index=False)
         self._log(f"[run] results table → {out}")
 
@@ -1139,15 +1354,26 @@ class CostModelAgent:
         tools: list[Tool],
         briefing: str | None = None,
         final_answer_doc: str | None = None,
+        mode: str = "",
     ) -> str:
+        if "customCost" in mode or "sampleCost" in mode:
+            estimate_rule = (
+                "### Estimate before executing\n"
+                "Once a cost model is installed, you MUST call `compare_plan_costs` on all new candidate plans\n"
+                "before executing any of them. Executing a plan without first consulting cost estimates wastes\n"
+                "budget steps and defeats the purpose of the cost model."
+            )
+        else:
+            estimate_rule = ""
         return _SYSTEM_TEMPLATE.format(
             briefing=briefing if briefing is not None else self.briefing,
             tools_doc="\n\n".join(t.doc for t in tools),
             physical_sem_ops="\n".join(f"- {d}" for d in _PHYSICAL_SEMANTIC_OPERATORS.values()),
             physical_nonsem_ops="\n".join(f"- {d}" for d in _PHYSICAL_NONSEMANTIC_OPERATORS.values()),
-            available_models="\n".join(f"- {m}" for m in _AVAILABLE_MODELS),
+            available_models=_AVAILABLE_MODELS_TEXT,
             max_steps=self.max_steps,
             final_answer_doc=final_answer_doc if final_answer_doc is not None else self.final_answer_doc,
+            estimate_rule=estimate_rule,
         )
 
     def _opening_message(self, task: str, plans: dict, results: ResultsStore) -> str:
@@ -1165,7 +1391,9 @@ class CostModelAgent:
             f"{plans_section}\n\n"
             f"Observed-results store summary:\n"
             f"{json.dumps(results.summary(), indent=2)}\n\n"
-            f"Begin."
+            f"Begin. Output exactly ONE ```python``` block for your first step — "
+            f"a single tool call (e.g. list_files()). Do not write multiple blocks, "
+            f"plan ahead in prose, or produce a final answer yet."
         )
 
     def _trim(self, messages: list[dict]) -> list[dict]:
@@ -1192,12 +1420,11 @@ class CostModelAgent:
         *,
         mode: str,
         query_info: dict = {
-            "use_case": "movie",
-            "scale_factor": 2000,
-            "query_id": 1,
-            "data_dir": "agent_cost_model/dataset/movie",
-            "gt_dir": "files/movie/raw_results/ground_truth",
-            "raw_results_dir": "files/movie/raw_results/palimpzest",
+            "use_case": "use_case",
+            "scale_factor": 0,
+            "query_id": 0,
+            "data_dir": "agent_cost_model/dataset/use_case",
+            "gt_dir": "files/use_case/raw_results/ground_truth"
         },
     ) -> Any:
         """Run the loop over `plans` and `plan_results`, `op_results`, returning the JSON final answer.
@@ -1207,21 +1434,9 @@ class CostModelAgent:
         """
         import litellm as _litellm
         _litellm.suppress_debug_info = True
+        _litellm.drop_params = True  # OpenRouter rejects reasoning_effort for Google models
         _orig_completion = _litellm.completion
-        _TOGETHER_TO_OPENROUTER: dict[str, str] = {
-            "meta-llama/Llama-3.2-3B-Instruct-Turbo":         "meta-llama/llama-3.2-3b-instruct",
-            "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo":    "meta-llama/llama-3.1-8b-instruct",
-            "meta-llama/Llama-3.3-70B-Instruct-Turbo":        "meta-llama/llama-3.3-70b-instruct",
-            "meta-llama/Llama-3.2-90B-Vision-Instruct-Turbo": "meta-llama/llama-3.2-90b-vision-instruct",
-            "deepseek-ai/DeepSeek-V3":                         "deepseek/deepseek-chat",
-            # "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": removed — no active OpenRouter endpoints
-        }
         def _openrouter_completion(model, **kwargs):
-            if model.startswith("vertex_ai/"):
-                model = "google/" + model[len("vertex_ai/"):]
-            elif model.startswith("together_ai/"):
-                together_name = model[len("together_ai/"):]
-                model = _TOGETHER_TO_OPENROUTER.get(together_name, together_name)
             if not model.startswith("openrouter/"):
                 model = "openrouter/" + model
             return _orig_completion(model=model, **kwargs)
@@ -1231,81 +1446,139 @@ class CostModelAgent:
 
         registry = CostModelRegistry()
         plan_codes: dict = {}  # populated by WritePlanTool; shared with ExecutePlanTool
-
         data_dir = query_info["data_dir"]
-        
-        tools = [
-            ListFilesTool(data_dir),
-            ExploreSchemaT(data_dir),
-            ExploreSampleTool(data_dir),
-            WritePlanTool(plan_codes, plans=plans, data_dir=data_dir),
-            ExecutePlanTool(
-                    plan_codes=plan_codes,
-                    plans=plans,
-                    plan_results=plan_results,
-                    op_results=op_results,
+
+        # Build oracle client and quality evaluator (oracle runs inside QualityEvaluator)
+        oracle_client = OpenRouterClient(self.oracle_model, reasoning_effort=self.oracle_reasoning_effort)
+        llm_judge_dir = f"files/{query_info['use_case']}/llm_judge"
+        import shutil
+        _llm_judge_path = pathlib.Path(llm_judge_dir)
+        if _llm_judge_path.exists():
+            shutil.rmtree(_llm_judge_path)
+        _llm_judge_path.mkdir(parents=True, exist_ok=True)
+
+        _oracle_result_path = (
+            pathlib.Path(__file__).parent
+            / "datasubset"
+            / query_info["use_case"]
+            / f"Q{query_info['query_id']}_oracle_result.csv"
+        )
+        _oracle_result_path.unlink(missing_ok=True)
+
+        quality_evaluator = None
+        if _QualityEvaluator is not None:
+            try:
+                quality_evaluator = _QualityEvaluator(
+                    oracle_client=oracle_client,
+                    oracle_model=self.oracle_model,
+                    query_id=query_info["query_id"],
                     use_case=query_info["use_case"],
                     scale_factor=query_info["scale_factor"],
-                    query_id=query_info["query_id"],
-                    data_dir=data_dir,
                     agent_dir=self.agent_dir,
-                    gt_dir=query_info["gt_dir"],
-                    raw_results_dir=query_info["raw_results_dir"],
-                ),
-            # InspectPlanTool()
-        ]
-
-        assert query_info is not None
-        extra_sandbox_vars: dict = {}
-        if mode == "customCost":
-            tools += [
-                EstimatePlanCostTool(registry),
-                UpdateCostModelTool(registry, plan_results= plan_results, op_results = op_results),
-            ]
-            briefing = self.customCost_briefing
-            final_answer_doc = self.customCost_final_answer_doc
-        elif mode == "execute":
-            briefing = self.execute_briefing
-            final_answer_doc = self.execute_final_answer_doc
-        elif mode == "sampleCost":
-            try:
-                from sample_based_cost_model import SampleBasedCostModel
-            except ImportError:
-                from agent_cost_model.sample_based_cost_model import SampleBasedCostModel  # type: ignore
-            registry.install(SampleBasedCostModel(op_results), notes="v0: SampleBasedCostModel pre-installed")
-            tools += [EstimatePlanCostTool(registry)]
-            extra_sandbox_vars["SampleBasedCostModel"] = SampleBasedCostModel
-            briefing = self.sampleCost_briefing
-            final_answer_doc = self.sampleCost_final_answer_doc
-
-        executor = LocalPythonExecutor(additional_authorized_imports=self.authorized_imports)
-        executor.send_tools({t.name: t for t in tools})
+                    llm_judge_dir=llm_judge_dir,
+                    oracle_reasoning_effort=self.oracle_reasoning_effort,
+                )
+            except Exception as e:
+                print(f"[run] QualityEvaluator init failed: {e}")
 
         import pandas as pd
+        try:
+            from agent.physical_pipeline import PhysicalPipeline
+        except ImportError:
+            from physical_pipeline import PhysicalPipeline  # type: ignore
+        try:
+            import palimpzest as pz
+        except ImportError as exc:
+            raise ImportError("palimpzest is required to build plans") from exc
+
         def load_data(filename: str) -> pd.DataFrame:
-            return pd.read_csv(data_dir / filename) #TODO: temporary implementation to allow agent to directly run load_data
-        executor.send_variables({
+            return pd.read_csv(os.path.join(data_dir, filename))
+
+        def add_image_data(pipeline: PhysicalPipeline, col_name: str = "image_file_path"):
+            pipeline.map(
+                udf=lambda row: {col_name: os.path.join(data_dir, "images", str(row["prod_id"]) + ".jpg")},
+                cols=[{"name": col_name, "type": pz.ImageFilepath, "description": ""}],
+            )
+            return pipeline
+
+        variables = {
             "load_data": load_data,
+            "add_image_data": add_image_data,
+            "PhysicalPipeline": PhysicalPipeline,
+            "pz": pz,
             "plans": plans,
             "plan_codes": plan_codes,
             "plan_results": plan_results,
-            "op_results": op_results,   
-            "PlanCostEstimate": PlanCostEstimate,
-            "CostModel": CostModel,
+            "op_results": op_results,
             "iter_operators": iter_operators,
             "get_op_type": get_op_type,
             "get_op_id": get_op_id,
             "get_op_model": get_op_model,
             "describe_operator": describe_operator,
-            "data_dir": str(query_info["data_dir"]),
-            **extra_sandbox_vars,
-        })
+        }
 
-        system = self._system_prompt(tools, briefing, final_answer_doc)
+        base_tools = [
+            ListFilesTool(data_dir),
+            ExploreSchemaT(data_dir),
+            ExploreSampleTool(data_dir),
+            GetOpSamplesTool(plan_results),
+            ExecutePlanTool(
+                plan_codes=plan_codes,
+                plans=plans,
+                plan_results=plan_results,
+                op_results=op_results,
+                use_case=query_info["use_case"],
+                query_id=query_info["query_id"],
+                data_dir=data_dir,
+                agent_dir=self.agent_dir,
+                quality_evaluator=quality_evaluator,
+            ),
+        ]
+
+        if "customCost" in mode:
+            base_tools += [
+                EstimatePlanCostTool(registry),
+                ComparePlanCostsTool(registry, plans=plans, plan_results=plan_results),
+                UpdateCostModelTool(registry, plan_results=plan_results, op_results=op_results),
+            ]
+            variables.update({
+                "PlanCostEstimate": PlanCostEstimate,
+                "CostModel": CostModel,
+            })
+            briefing = self.customCost_briefing
+            final_answer_doc = self.customCost_final_answer_doc
+        elif "execute" in mode:
+            briefing = self.execute_briefing
+            final_answer_doc = self.execute_final_answer_doc
+        elif "sampleCost" in mode:
+            try:
+                from sample_based_cost_model import SampleBasedCostModel
+            except ImportError:
+                from agent_cost_model.sample_based_cost_model import SampleBasedCostModel  # type: ignore
+            registry.install(SampleBasedCostModel(op_results), notes="v0: SampleBasedCostModel pre-installed")
+            base_tools += [EstimatePlanCostTool(registry)]
+            variables.update({
+                "PlanCostEstimate": PlanCostEstimate,
+                "SampleBasedCostModel": SampleBasedCostModel,
+            })
+            briefing = self.sampleCost_briefing
+            final_answer_doc = self.sampleCost_final_answer_doc
+
+        # Create executor first so WritePlanTool can share the same sandbox state.
+        executor = LocalPythonExecutor(additional_authorized_imports=self.authorized_imports)
+        executor.send_variables(variables)
+        write_plan_tool = WritePlanTool(plan_codes, plans=plans, executor=executor)
+        tools = base_tools + [write_plan_tool]
+        executor.send_tools({t.name: t for t in tools})
+
+        system = self._system_prompt(tools, briefing, final_answer_doc, mode=mode)
         opening = self._opening_message(task, plans, op_results)
         self.messages = [{"role": "user", "content": opening}]
         self.reasoning_steps = []
         self.trajectory_steps = []
+        self.agent_cost_usd = 0.0
+        self.execution_cost_usd = 0.0
+        self.oracle_cost_usd = 0.0
         self._log(f"\n=== system prompt ({len(system)} chars) ===\n{system}\n")
         self._log(f"=== task ===\n{opening}\n")
 
@@ -1320,7 +1593,9 @@ class CostModelAgent:
                 raise
             self.messages.append({"role": "assistant", "content": raw})
             reasoning = self.reasoning_steps[-1]
-            self.trajectory_steps.append({"step": step, "reasoning": reasoning, "assistant": raw})
+            self.trajectory_steps.append(
+                {"step": step, "reasoning": reasoning, "assistant": raw, "observation": None}
+            )
             if reasoning:
                 self._log(f"\n--- reasoning (step {step}) ---\n{reasoning}\n")
             self._log(f"\n--- assistant (step {step}) ---\n{raw}\n")
@@ -1331,17 +1606,25 @@ class CostModelAgent:
             except ParseError as e:
                 obs = f"Observation (step {step}): {e.detail}"
                 self.messages.append({"role": "user", "content": obs})
+                self.trajectory_steps[-1]["observation"] = obs
                 self._log(f"[parse error] {obs}")
                 continue
 
             if parsed.code is None:  # final answer
                 self._log(f"[final answer] {parsed.result}")
+                self.trajectory_steps[-1]["observation"] = f"[final answer] {parsed.result}"
                 if isinstance(parsed.result, dict):
                     parsed.result["plan_codes"] = plan_codes
                 self._save_results_df(plan_results, query_info, final_answer=parsed.result)
                 self._save_trajectory_df(query_info)
-                if mode == "customCost":
+                if "customCost" in mode:
                     self._save_cost_model_codes(cost_model_codes, query_info)
+                self.execution_cost_usd = sum(float(r.get("cost_usd", 0.0) or 0.0) for r in plan_results.rows)
+                self.oracle_cost_usd = (
+                    float(getattr(quality_evaluator, "total_oracle_cost_usd", 0.0) or 0.0)
+                    if quality_evaluator is not None else 0.0
+                )
+                self._run_final_evaluation(parsed.result, plans, query_info, plan_codes, plan_results)
                 return parsed.result
 
             # execute the python tool-call block
@@ -1351,24 +1634,32 @@ class CostModelAgent:
             except Exception as e:
                 obs = f"Observation (step {step}): exec failed — {type(e).__name__}: {e}"
                 self.messages.append({"role": "user", "content": obs})
+                self.trajectory_steps[-1]["observation"] = obs
                 self._log(obs)
                 continue
 
-            if mode == "customCost" and registry.version > prev_registry_version:
+            if "customCost" in mode and registry.version > prev_registry_version:
                 cost_model_codes[f"v{registry.version}"] = parsed.code
 
             obs = self._format_observation(step, out)
             self.messages.append({"role": "user", "content": obs})
+            self.trajectory_steps[-1]["observation"] = obs
             self._log(obs)
 
         # out of steps — one forced terminal turn
         self._save_results_df(plan_results, query_info)
         self._save_trajectory_df(query_info)
-        if mode == "customCost":
+        if "customCost" in mode:
             self._save_cost_model_codes(cost_model_codes, query_info)
         result = self._terminal_turn(system)
         if isinstance(result, dict):
             result["plan_codes"] = plan_codes
+        self.execution_cost_usd = sum(float(r.get("cost_usd", 0.0) or 0.0) for r in plan_results.rows)
+        self.oracle_cost_usd = (
+            float(getattr(quality_evaluator, "total_oracle_cost_usd", 0.0) or 0.0)
+            if quality_evaluator is not None else 0.0
+        )
+        self._run_final_evaluation(result, plans, query_info, plan_codes, plan_results)
         return result
 
     # -- helpers -----------------------------------------------------------
@@ -1376,7 +1667,18 @@ class CostModelAgent:
         msgs = self._trim(self.messages)
         if extra:
             msgs = msgs + extra
-        content, reasoning = self.llm.generate(system, msgs)
+        result = self.llm.generate(system, msgs)
+        content = result
+        reasoning = None
+        meta: dict[str, Any] = {}
+        if isinstance(result, tuple):
+            if len(result) >= 1:
+                content = result[0]
+            if len(result) >= 2:
+                reasoning = result[1]
+            if len(result) >= 3 and isinstance(result[2], dict):
+                meta = result[2]
+        self.agent_cost_usd += float(meta.get("cost_usd", 0.0) or 0.0)
         self.reasoning_steps.append(reasoning)
         return content
 
@@ -1399,6 +1701,8 @@ class CostModelAgent:
                 text = self._llm_step(system)
                 self.messages.append({"role": "assistant", "content": text})
 
+    _OBS_CHAR_LIMIT = 10_000
+
     @staticmethod
     def _format_observation(step: int, out: Any) -> str:
         parts = [f"Observation (step {step}):"]
@@ -1411,7 +1715,117 @@ class CostModelAgent:
             parts.append(f"[result]\n{result_s}")
         if len(parts) == 1:
             parts.append("[no output]")
-        return "\n\n".join(parts)
+        obs = "\n\n".join(parts)
+        limit = CostModelAgent._OBS_CHAR_LIMIT
+        if len(obs) > limit:
+            obs = obs[:limit] + (
+                f"\n\n[output truncated — {len(obs) - limit} chars omitted. "
+                "Use get_op_samples(plan_name, op_name) to inspect specific input/output pairs.]"
+            )
+        return obs
+
+    def _run_final_evaluation(
+        self,
+        final_answer: Any,
+        plans: dict,
+        query_info: dict,
+        plan_codes: dict | None = None,
+        plan_results: "ResultsStore | None" = None,
+    ) -> None:
+        """Run the agent-selected plan on the full dataset vs. real ground truth; append to metrics JSON."""
+        if not isinstance(final_answer, dict):
+            return
+        best_name = final_answer.get("best_plan", {}).get("name")
+        if not best_name or best_name not in plans:
+            self._log(f"[final_eval] plan {best_name!r} not in plans — skipping final evaluation")
+            return
+
+        pipeline = plans[best_name]
+        query_id = query_info["query_id"]
+        use_case = query_info["use_case"]
+        scale_factor = query_info["scale_factor"]
+        gt_dir = query_info.get("gt_dir", f"files/{use_case}/raw_results/ground_truth")
+
+        import dataclasses
+        import pathlib
+
+        import pandas as pd
+
+        gt_path = pathlib.Path(gt_dir) / f"Q{query_id}.csv"
+        if not gt_path.exists():
+            self._log(f"[final_eval] ground truth not found at {gt_path} — skipping")
+            return
+
+        self._log(f"[final_eval] running {best_name!r} on full dataset...")
+        try:
+            result_collection, op_results_full, _ = pipeline.run()
+        except Exception as e:
+            self._log(f"[final_eval] pipeline.run() failed: {type(e).__name__}: {e}")
+            return
+
+        results_df = result_collection.to_df()
+        raw_results_dir = pathlib.Path(f"files/{use_case}/raw_results/palimpzest/{self.agent_dir}")
+        raw_results_dir.mkdir(parents=True, exist_ok=True)
+        results_df.to_csv(raw_results_dir / f"Q{query_id}.csv", index=False)
+        self._log(f"[final_eval] raw results → {raw_results_dir / f'Q{query_id}.csv'}")
+        results_df = _normalize_plan_df(results_df, use_case, query_id)
+
+        total_latency = sum(r.get("latency_s", 0) for r in op_results_full)
+        total_cost = sum(r.get("cost_usd", 0) for r in op_results_full)
+
+        quality = float("nan")
+        metric_type = "unknown"
+        try:
+            from agent_cost_model.quality_evaluator import _load_evaluator
+            evaluator = _load_evaluator(use_case, scale_factor, self.agent_dir)
+            gt_df = pd.read_csv(gt_path)
+            qm = evaluator._evaluate_single_query(query_id, results_df, gt_df)
+            qm_dict = dataclasses.asdict(qm)
+            qm_type = type(qm).__name__
+            if "Retrieval" in qm_type:
+                metric_type = "f1_score"
+                quality = float(qm_dict.get("f1_score", float("nan")))
+            elif "Aggregation" in qm_type:
+                metric_type = "relative_error"
+                quality = 1.0 - float(qm_dict.get("relative_error", 1.0))
+            elif "Rank" in qm_type:
+                metric_type = "spearman_correlation"
+                quality = float(qm_dict.get("spearman_correlation", float("nan")))
+            elif "SingleAccuracy" in qm_type:
+                metric_type = "accuracy"
+                quality = float(qm_dict.get("accuracy", float("nan")))
+        except Exception as e:
+            self._log(f"[final_eval] evaluation failed: {type(e).__name__}: {e}")
+
+        metrics_path = pathlib.Path(f"files/{use_case}/metrics/{self.agent_dir}.json")
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        entry: dict = {}
+        if metrics_path.exists():
+            try:
+                entry = json.loads(metrics_path.read_text())
+            except Exception:
+                entry = {}
+        plans_written = len(plan_codes) if plan_codes is not None else 0
+        _executed_rows = [r.get("plan_name") for r in (plan_results.rows if plan_results is not None else []) if r.get("plan_name")]
+        plans_executed = len(_executed_rows)
+        unique_plans_executed = len(set(_executed_rows))
+        runcount = query_info.get("runcount")
+        metrics_key = f"{query_id}_{runcount}" if runcount is not None else str(query_id)
+        entry[metrics_key] = {
+            "query_id": str(query_id),
+            "latency": round(total_latency, 4),
+            "cost": round(total_cost, 6),
+            "agent_cost": round(self.agent_cost_usd, 6),
+            "subset_execution_cost": round(self.execution_cost_usd, 6),
+            "oracle_cost": round(self.oracle_cost_usd, 6),
+            "metric_type": metric_type,
+            "quality": quality,
+            "plans_written": plans_written,
+            "plans_executed": plans_executed,
+            "unique_plans_executed": unique_plans_executed,
+        }
+        metrics_path.write_text(json.dumps(entry, indent=2))
+        self._log(f"[final_eval] metrics → {metrics_path}")
 
     _TERMINAL_PROMPT = (
         "You are out of steps. Do NOT call any tool — emit exactly ONE ```json``` block: "

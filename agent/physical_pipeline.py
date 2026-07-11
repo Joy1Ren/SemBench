@@ -1,11 +1,13 @@
 """Physical pipeline: chain PZ physical operators directly with per-operator model selection."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import inspect
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import pandas as pd
@@ -13,19 +15,55 @@ import pandas as pd
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
-from palimpzest.constants import Model
+from palimpzest.constants import Model, PromptStrategy
 from palimpzest.core.elements.filters import Filter
 from palimpzest.core.elements.groupbysig import GroupBySig
 from palimpzest.core.elements.records import DataRecord, DataRecordCollection
-from palimpzest.core.lib.schemas import _create_pickleable_model, create_schema_from_df
+from palimpzest.core.lib.schemas import ImageFilepath, _create_pickleable_model, create_schema_from_df
 from palimpzest.core.models import ExecutionStats
 from palimpzest.query.operators.aggregate import ApplyGroupByOp
-from palimpzest.query.operators.logical import GroupByAggregate
-from palimpzest.query.operators.convert import LLMConvertBonded
+from palimpzest.query.operators.convert import LLMConvertBonded, NonLLMConvert
 from palimpzest.query.operators.filter import LLMFilter, NonLLMFilter
 from palimpzest.query.operators.join import NestedLoopsJoin
 from palimpzest.query.operators.limit import LimitScanOp
 from palimpzest.query.operators.project import ProjectOp
+
+NUM_SAMPLES = 10
+SUBSET_SEED = 42
+
+
+def _str_to_pz_model(model_str: str) -> Model:
+    """Map an OpenRouter/PZ model string to pz.Model enum value.
+
+    Accepts exact matches or unambiguous prefix matches so callers can pass
+    short names like "openai/o4-mini" for "openai/o4-mini-2025-04-16".
+    """
+    for m in Model:
+        if m.value == model_str:
+            return m
+    # Prefix fallback: "openai/o4-mini" → "openai/o4-mini-2025-04-16"
+    matches = [m for m in Model if m.value.startswith(model_str)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Ambiguous oracle model {model_str!r}: matches "
+            f"{[m.value for m in matches]}. Use a more specific string."
+        )
+    raise ValueError(
+        f"Unknown oracle model: {model_str!r}. "
+        f"Available: {[m.value for m in Model]}"
+    )
+
+
+@dataclass
+class SubsetExecutionContext:
+    """Execution context returned by run_subset(), used by QualityEvaluator."""
+    sampled_records: list[dict]               # sampled left-side input rows as plain dicts
+    output_records: list[dict]                # final pipeline output rows as plain dicts
+    per_sem_op_info: dict[int, dict]          # stage_idx → {op_name, op_type, attributes, samples}
+    has_join: bool
+    right_sampled_records: list[dict] | None  # right-side sampled rows if join, else None
 
 
 def _resolve_reasoning_effort(model: Model) -> str | None:
@@ -33,10 +71,12 @@ def _resolve_reasoning_effort(model: Model) -> str | None:
     if model is None or not model.is_reasoning_model():
         return None
     if model.is_vertex_model() or model.is_google_model():
-        if model in (Model.GEMINI_2_5_PRO, getattr(Model, 'GOOGLE_GEMINI_2_5_PRO', None)):
+        if model in (getattr(Model, 'GEMINI_2_5_PRO', None), getattr(Model, 'GOOGLE_GEMINI_2_5_PRO', None)):
             return "low"
         return "disable"
     if model.is_openai_model():
+        if model == getattr(Model, 'o4_MINI', None):
+            return "low"
         return "minimal"
     return None
 
@@ -92,21 +132,33 @@ class SemFilter(Operator):
     stage_type = "filter"
     op_type = "sem_filter"
 
-    def __init__(self, condition: str, model: Model, schema, depends_on: list[str] | None = None):
+    def __init__(self, condition: str, model: Model, schema, depends_on: list[str] | None = None, reasoning_effort_override: str | None = None):
         super().__init__()
         self.model = model
+        eff = reasoning_effort_override if reasoning_effort_override is not None else _resolve_reasoning_effort(model)
         self._pz_op = LLMFilter(
             model=model,
             filter=Filter(filter_condition=condition),
             output_schema=schema,
             input_schema=schema,
             depends_on=depends_on,
-            reasoning_effort=_resolve_reasoning_effort(model),
+            reasoning_effort=eff,
         )
         self._pz_op.model = model
-        self.attributes = {"condition": condition, "model": model.value}
+        self.depends_on = depends_on
+        self.attributes = {"condition": condition, "model": model.value, "depends_on": depends_on}
         self.params_id = _compute_op_id(self.op_type, {"model": model.value})
         # self.params_id = _compute_op_id(self.op_type, self.attributes)
+
+
+def _has_image_field(schema, field_names: list[str] | None) -> bool:
+    """Return True if any of the given fields (or all fields if None) in schema have ImageFilepath type."""
+    fields_to_check = field_names if field_names is not None else list(schema.model_fields)
+    for name in fields_to_check:
+        fi = schema.model_fields.get(name)
+        if fi is not None and fi.annotation in (ImageFilepath, ImageFilepath | None):
+            return True
+    return False
 
 
 class SemMap(Operator):
@@ -114,18 +166,27 @@ class SemMap(Operator):
     stage_type = "convert"
     op_type = "sem_map"
 
-    def __init__(self, cols: list[dict], model: Model, input_schema, output_schema, depends_on: list[str] | None = None):
+    def __init__(self, cols: list[dict], model: Model, input_schema, output_schema, depends_on: list[str] | None = None, reasoning_effort_override: str | None = None):
         super().__init__()
         self.model = model
+        eff = reasoning_effort_override if reasoning_effort_override is not None else _resolve_reasoning_effort(model)
+        is_image = _has_image_field(input_schema, depends_on)
+        if is_image:
+            prompt_strategy = PromptStrategy.COT_QA_IMAGE_NO_REASONING if (model.is_reasoning_model() and eff in (None, "minimal", "low", "disable")) else PromptStrategy.COT_QA_IMAGE
+        else:
+            prompt_strategy = PromptStrategy.COT_QA_NO_REASONING if (model.is_reasoning_model() and eff in (None, "minimal", "low", "disable")) else PromptStrategy.COT_QA
         self._pz_op = LLMConvertBonded(
             model=model,
+            prompt_strategy=prompt_strategy,
             output_schema=output_schema,
             input_schema=input_schema,
             depends_on=depends_on,
-            reasoning_effort=_resolve_reasoning_effort(model),
+            reasoning_effort=eff,
         )
         self._pz_op.model = model
-        self.attributes = {"model": model.value, "cols": sorted(col["name"] for col in cols)}
+        self.depends_on = depends_on
+        self._cols_full = cols  # preserved for make_oracle_copy
+        self.attributes = {"model": model.value, "cols": sorted(col["name"] for col in cols), "depends_on": depends_on}
         self.params_id = _compute_op_id(self.op_type, self.attributes)
 
 
@@ -142,9 +203,11 @@ class SemJoin(Operator):
         join_parallelism: int,
         depends_on: list[str] | None,
         schema,
+        reasoning_effort_override: str | None = None,
     ):
         super().__init__()
         self.model = model
+        eff = reasoning_effort_override if reasoning_effort_override is not None else _resolve_reasoning_effort(model)
         self._pz_op = NestedLoopsJoin(
             model=model,
             condition=condition,
@@ -152,11 +215,12 @@ class SemJoin(Operator):
             input_schema=schema,
             join_parallelism=join_parallelism,
             depends_on=depends_on,
-            reasoning_effort=_resolve_reasoning_effort(model),
+            reasoning_effort=eff,
         )
         self._pz_op.model = model
+        self.depends_on = depends_on
         self.other = other
-        self.attributes = {"condition": condition, "model": model.value, "join_parallelism": join_parallelism}
+        self.attributes = {"condition": condition, "model": model.value, "join_parallelism": join_parallelism, "depends_on": depends_on}
         self.params_id = _compute_op_id(self.op_type, {"model": model.value})
         # self.params_id = _compute_op_id(self.op_type, self.attributes)
 
@@ -173,12 +237,36 @@ class ExactFilter(Operator):
             output_schema=schema,
             input_schema=schema,
         )
+        self._fn = fn  # preserved for make_oracle_copy
         try:
             fn_src = inspect.getsource(fn).strip()
         except (OSError, TypeError):
             fn_src = repr(fn)
         self.attributes = {"condition": fn_src}
         self.params_id = _compute_op_id(self.op_type, self.attributes)
+
+
+class Map(Operator):
+    """Deterministic (non-LLM) column derivation via UDF."""
+    stage_type = "convert"
+    op_type = "map"
+
+    def __init__(self, udf: Callable, cols: list[dict], input_schema, output_schema):
+        super().__init__()
+        self._pz_op = NonLLMConvert(
+            udf=udf,
+            output_schema=output_schema,
+            input_schema=input_schema,
+        )
+        self._udf = udf          # preserved for make_oracle_copy
+        self._cols_full = cols   # preserved for make_oracle_copy
+        try:
+            fn_src = inspect.getsource(udf).strip()
+        except (OSError, TypeError):
+            fn_src = repr(udf)
+        col_names = sorted(col["name"] for col in cols)
+        self.attributes = {"cols": col_names, "udf": fn_src}
+        self.params_id = _compute_op_id(self.op_type, {"cols": col_names, "udf": fn_src})
 
 
 class Project(Operator):
@@ -233,13 +321,6 @@ class GroupBy(Operator):
             agg_fields=agg_fields,
         )
         self.output_schema = sig.output_schema()
-        # operator = GroupByAggregate(input_schema=self.schema, output_schema=output_schema, group_by_sig=groupby)
-        # return Dataset(sources=[self], operator=operator, schema=output_schema)
-        # self._pz_op = GroupByAggregate(
-        #     input_schema=input_schema,
-        #     output_schema = self.output_schema,
-        #     group_by_sig=sig
-        # )
         self._pz_op = ApplyGroupByOp(
             group_by_sig=sig,
             output_schema=self.output_schema,
@@ -271,9 +352,9 @@ class PhysicalPipeline:
         return pipeline.run()
     """
 
-    def __init__(self, plan_name, source_name: str, data: pd.DataFrame, max_workers: int = 20):
+    def __init__(self, plan_name, source: str, data: pd.DataFrame, max_workers: int = 20):
         self.plan_name = plan_name
-        self._source = source_name
+        self._source = source
         self._df = data
         self._max_workers = max_workers
         self._initial_schema = create_schema_from_df(data)
@@ -286,14 +367,27 @@ class PhysicalPipeline:
         self._ops: list[Operator] = []
         self._last_exec_stats = None      # populated by run(); used by to_results_row()
 
+    def _flat_ops(self) -> list[tuple[str, "Operator"]]:
+        """All operators in topological order with display names.
+        Right-branch operators of a SemJoin appear before the join itself."""
+        result = []
+        main_idx = 1
+        for op in self._ops:
+            if isinstance(op, SemJoin):
+                for name, right_op in op.other._flat_ops():
+                    result.append((name, right_op))
+            result.append((f"{self.plan_name}_op{main_idx}", op))
+            main_idx += 1
+        return result
+
     def __str__(self) -> str:
-        if not self._ops:
+        flat = self._flat_ops()
+        if not flat:
             return "EmptyPipeline"
-        op_names = [self.plan_name + f"-op{idx}" for idx in range (1, len(self._ops)+1)]
-        pretty_text = f"Plan: {self.plan_name}: ({",".join(f"{name}" for name in op_names)})" 
-        pretty_text += "Operators in topological order:"
-        for op_name, op in zip(op_names, self._ops):
-            pretty_text += f"""\n ====={op_name}===== \n   {str(op)}"""
+        op_names = [name for name, _ in flat]
+        pretty_text = f"Plan: {self.plan_name}: ({', '.join(op_names)})\nOperators in topological order:"
+        for name, op in flat:
+            pretty_text += f"\n ====={name}=====\n   {str(op)}"
         return pretty_text
 
 
@@ -301,27 +395,29 @@ class PhysicalPipeline:
     # Semantic operators
     # ------------------------------------------------------------------
 
-    def sem_filter(self, condition: str, model: Model, depends_on: list[str] | None = None) -> "PhysicalPipeline":
+    def sem_filter(self, condition: str, model: Model, depends_on: list[str] | None = None, reasoning_effort_override: str | None = None) -> "PhysicalPipeline":
         """LLM-based row filter. Keeps records where condition is true."""
-        self._ops.append(SemFilter(condition=condition, model=model, schema=self._schema, depends_on=depends_on))
+        self._ops.append(SemFilter(condition=condition, model=model, schema=self._schema, depends_on=depends_on, reasoning_effort_override=reasoning_effort_override))
         return self
 
-    def sem_map(self, cols: list[dict], model: Model, depends_on: list[str] | None = None) -> "PhysicalPipeline":
+    def sem_map(self, cols: list[dict], model: Model, depends_on: list[str] | None = None, reasoning_effort_override: str | None = None) -> "PhysicalPipeline":
         """
         LLM-based column derivation. Adds new fields to each record.
 
         cols: list of {"name": str, "type": type, "description": str}
             description is passed as FieldInfo and used by the LLM generator.
         """
-        new_defs = {
-            col["name"]: (
-                Optional[col.get("type", Any)],
-                FieldInfo(default=None, description=col["description"]),
-            )
-            for col in cols
-        }
+        new_defs = {}
+        for col in cols:
+            name = col["name"]
+            if name in self._defs:
+                # Preserve the existing annotation to avoid union_schemas type mismatch
+                ann = self._defs[name][0]
+            else:
+                ann = Optional[col.get("type", Any)]
+            new_defs[name] = (ann, FieldInfo(default=None, description=col["description"]))
         output_schema = _make_schema({**self._defs, **new_defs})
-        self._ops.append(SemMap(cols=cols, model=model, input_schema=self._schema, output_schema=output_schema, depends_on=depends_on))
+        self._ops.append(SemMap(cols=cols, model=model, input_schema=self._schema, output_schema=output_schema, depends_on=depends_on, reasoning_effort_override=reasoning_effort_override))
         self._defs = {**self._defs, **new_defs}
         self._schema = output_schema
         return self
@@ -333,6 +429,7 @@ class PhysicalPipeline:
         model: Model,
         join_parallelism: int = 20,
         depends_on: list[str] | None = None,
+        reasoning_effort_override: str | None = None,
     ) -> "PhysicalPipeline":
         """
         LLM-based join. Keeps pairs of (self record, other record) where condition holds.
@@ -347,6 +444,7 @@ class PhysicalPipeline:
             join_parallelism=join_parallelism,
             depends_on=depends_on,
             schema=joined_schema,
+            reasoning_effort_override=reasoning_effort_override,
         ))
         self._defs = merged_defs
         self._schema = joined_schema
@@ -359,6 +457,28 @@ class PhysicalPipeline:
     def filter(self, fn: Callable[[dict], bool]) -> "PhysicalPipeline":
         """Exact (non-LLM) row filter. fn receives a record dict and returns bool."""
         self._ops.append(ExactFilter(fn=fn, schema=self._schema))
+        return self
+
+    def map(self, udf: Callable[[dict], dict], cols: list[dict]) -> "PhysicalPipeline":
+        """
+        Deterministic (non-LLM) column derivation via UDF.
+
+        udf: callable receiving a record dict, returning a dict with the new field values.
+        cols: list of {"name": str, "type": type, "description": str}
+            The type annotation is preserved in the schema — use pz.ImageFilepath to
+            signal image columns so PZ's prompt factory encodes them for LLM calls.
+        """
+        new_defs = {
+            col["name"]: (
+                Optional[col.get("type", Any)],
+                FieldInfo(default=None, description=col.get("description", "")),
+            )
+            for col in cols
+        }
+        output_schema = _make_schema({**self._defs, **new_defs})
+        self._ops.append(Map(udf=udf, cols=cols, input_schema=self._schema, output_schema=output_schema))
+        self._defs = {**self._defs, **new_defs}
+        self._schema = output_schema
         return self
 
     def project(self, cols: list[str]) -> "PhysicalPipeline":
@@ -406,35 +526,45 @@ class PhysicalPipeline:
     # ------------------------------------------------------------------
 
     def __iter__(self):
-        """Yield one Operator per stage in pipeline order."""
-        yield from self._ops
+        """Yield all operators in topological order (right-branch ops before their join)."""
+        for _, op in self._flat_ops():
+            yield op
 
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
 
-    def _execute(self) -> tuple[list[DataRecord], list, dict]:
+    def _build_initial_records(self, df: pd.DataFrame) -> list[DataRecord]:
+        """Build DataRecord objects from a DataFrame using this pipeline's initial schema."""
+        records: list[DataRecord] = []
+        for i in range(len(df)):
+            row = df.iloc[i].to_dict()
+            dr = DataRecord(schema=self._initial_schema, source_indices=f"{self._source}-{i}")
+            for k, v in row.items():
+                setattr(dr, k, v)
+            records.append(dr)
+        return records
+
+    def _execute(self) -> tuple[list[DataRecord], list, dict, dict]:
+        """Execute using all rows in self._df. Delegates to _execute_core."""
+        initial_records = self._build_initial_records(self._df)
+        return self._execute_core(initial_records, max_samples=5)
+
+    def _execute_core(self, initial_records: list[DataRecord], max_samples: int, skip_limit: bool = False) -> tuple[list[DataRecord], list, dict, dict]:
         from concurrent.futures import wait as fut_wait
         _POLL_INTERVAL = 0.3
 
         all_record_op_stats = []
 
-        # Build initial DataRecords for the left (main) pipeline
-        initial_records: list[DataRecord] = []
-        for i in range(len(self._df)):
-            row = self._df.iloc[i].to_dict()
-            dr = DataRecord(schema=self._initial_schema, source_indices=f"{self._source}-{i}")
-            for k, v in row.items():
-                setattr(dr, k, v)
-            initial_records.append(dr)
-
-        # Assign logical_op_ids and build stage_map for per-operator stat attribution
+        # Assign logical_op_ids and build stage_map for per-operator stat attribution.
+        # _flat_ops() includes right-branch operators so all ops appear in per_op_list.
         stage_map: dict[int, dict] = {}
-        for i, op in enumerate(self._ops):
+        for flat_idx, (op_name, op) in enumerate(self._flat_ops()):
             op.logical_op_id = op.params_id
             op._pz_op.logical_op_id = op.params_id
-            stage_map[i] = {
+            stage_map[flat_idx] = {
                 "logical_op_id": op.params_id,
+                "op_name": op_name,
                 "op_type": op.op_type,
                 "attributes": op.attributes,
                 "params_id": op.params_id,
@@ -444,16 +574,17 @@ class PhysicalPipeline:
         if n_ops == 0:
             return initial_records, all_record_op_stats, stage_map, {}
 
-        _MAX_SAMPLES = 5
-        # (input_record, Future) for per-record ops; (input_record, input_record) for limit
-        op_sample_pairs: dict[int, list] = {i: [] for i in range(n_ops)}
+        _MAX_SAMPLES = max_samples
+        # (input_record, Future) for per-record ops; keyed by id(op) so right-branch ops
+        # are captured alongside main-pipeline ops.
+        op_sample_pairs: dict[int, list] = {}  # id(op) -> [(input_dr, future)]
 
         # Main pipeline queues
         input_queues: dict[int, list] = {i: [] for i in range(n_ops)}
         future_queues: dict[int, list] = {i: [] for i in range(n_ops)}
         input_queues[0] = initial_records[:]
         output_records: list[DataRecord] = []
-        limit_val = next((op.n for op in self._ops if op.stage_type == "limit"), None)
+        limit_val = None if skip_limit else next((op.n for op in self._ops if op.stage_type == "limit"), None)
         # batch_size for filter/convert/project: limit value when present, else None (submit all)
         batch_size = limit_val
 
@@ -471,13 +602,7 @@ class PhysicalPipeline:
             if op.stage_type != "join":
                 continue
             other = op.other
-            r_initial: list[DataRecord] = []
-            for j in range(len(other._df)):
-                row = other._df.iloc[j].to_dict()
-                dr = DataRecord(schema=other._initial_schema, source_indices=f"{other._source}-{j}")
-                for k, v in row.items():
-                    setattr(dr, k, v)
-                r_initial.append(dr)
+            r_initial: list[DataRecord] = other._build_initial_records(other._df)
             for r_op in other._ops:
                 if r_op.logical_op_id is None:
                     r_op.logical_op_id = r_op.params_id
@@ -508,9 +633,12 @@ class PhysicalPipeline:
             fq_dict[key] = list(not_done)
             passing = []
             for future in done:
-                result = future.result()
-                all_record_op_stats.extend(result.record_op_stats)
-                passing.extend(dr for dr in result.data_records if dr.passed_operator)
+                try:
+                    result = future.result()
+                    all_record_op_stats.extend(result.record_op_stats)
+                    passing.extend(dr for dr in result.data_records if dr.passed_operator)
+                except Exception as _exc:
+                    print(f"[pipeline] record-level operator error (skipping record): {type(_exc).__name__}: {_exc}")
             return passing
 
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
@@ -530,10 +658,14 @@ class PhysicalPipeline:
 
                     # Step 3: submit work — operator type determines the path
                     if op.stage_type == "limit" and input_queues[stage_idx]:
-                        # Limit: pass records through without submitting to executor
-                        space = limit_val - len(output_records)
-                        to_pass = input_queues[stage_idx][:max(space, 0)]
-                        input_queues[stage_idx] = input_queues[stage_idx][len(to_pass):]
+                        if skip_limit:
+                            # Subset execution: pass all records through without truncation
+                            to_pass = input_queues[stage_idx][:]
+                            input_queues[stage_idx] = []
+                        else:
+                            space = limit_val - len(output_records)
+                            to_pass = input_queues[stage_idx][:max(space, 0)]
+                            input_queues[stage_idx] = input_queues[stage_idx][len(to_pass):]
                         if stage_idx == n_ops - 1:
                             output_records.extend(to_pass)
                             # Drain own future queue after limit to mirror PZ's second harvest,
@@ -585,7 +717,11 @@ class PhysicalPipeline:
                                     r_batch = r_iq[r_stage][:r_bs]
                                     r_iq[r_stage] = r_iq[r_stage][r_bs:]
                                     for rec in r_batch:
-                                        r_fq[r_stage].append(executor.submit(r_op, rec))
+                                        f = executor.submit(r_op, rec)
+                                        r_fq[r_stage].append(f)
+                                        r_op_key = id(r_op)
+                                        if len(op_sample_pairs.get(r_op_key, [])) < _MAX_SAMPLES:
+                                            op_sample_pairs.setdefault(r_op_key, []).append((rec, f))
                                 elif r_op.stage_type == "groupby":
                                     r_upstream_done = all(not r_iq.get(j) and not r_fq.get(j) for j in range(r_stage))
                                     if r_upstream_done and r_iq.get(r_stage):
@@ -648,28 +784,33 @@ class PhysicalPipeline:
                         # groupby is a barrier and must never be dispatched per-record
                         batch = input_queues[stage_idx][:batch_size]
                         input_queues[stage_idx] = [] if batch_size is None else input_queues[stage_idx][batch_size:]
+                        op_key = id(op)
                         for r in batch:
                             f = executor.submit(op, r)
                             future_queues[stage_idx].append(f)
-                            if len(op_sample_pairs[stage_idx]) < _MAX_SAMPLES:
-                                op_sample_pairs[stage_idx].append((r, f))
+                            if len(op_sample_pairs.get(op_key, [])) < _MAX_SAMPLES:
+                                op_sample_pairs.setdefault(op_key, []).append((r, f))
 
                 # Early stop once limit is satisfied
                 if limit_val is not None and len(output_records) >= limit_val:
                     break
 
-        if _join_call_counts:
-            print(f"[join summary] calls per stage: {_join_call_counts}")
+        # if _join_call_counts:
+        #     print(f"[join summary] calls per stage: {_join_call_counts}")
 
         # Resolve per-record sample futures → (input_dr, output_dr | None) pairs.
         # Join and groupby stages have no samples (can't link inputs to outputs).
+        # Keyed by id(op) so both main-pipeline and right-branch ops are included.
         op_samples: dict[int, list[tuple]] = {}
-        for stage_idx, pairs in op_sample_pairs.items():
-            op_samples[stage_idx] = []
+        for op_key, pairs in op_sample_pairs.items():
+            op_samples[op_key] = []
             for inp, f in pairs:
-                result = f.result()
-                out_recs = [dr for dr in result.data_records if dr.passed_operator]
-                op_samples[stage_idx].append((inp, out_recs[0] if out_recs else None))
+                try:
+                    result = f.result()
+                    out_recs = [dr for dr in result.data_records if dr.passed_operator]
+                    op_samples[op_key].append((inp, out_recs[0] if out_recs else None))
+                except Exception:
+                    op_samples[op_key].append((inp, None))
 
         return output_records[:limit_val] if limit_val is not None else output_records, all_record_op_stats, stage_map, op_samples
 
@@ -726,7 +867,7 @@ class PhysicalPipeline:
             meta = stage_map[stage_idx]
             s = op_agg.get(meta["logical_op_id"], _zero)
             per_op_list.append({
-                "op_name": f"{self.plan_name}_op{stage_idx + 1}",
+                "op_name": meta["op_name"],
                 "op_type": meta["op_type"],
                 "op_id": meta["params_id"],
                 "latency_s": s["latency_s"],
@@ -737,19 +878,29 @@ class PhysicalPipeline:
                 "num_passed": s["num_passed"],
             })
 
+        # for entry in per_op_list:
+        #     print(
+        #         f"[pipeline] {entry['op_name']} ({entry['op_type']}): "
+        #         f"{entry['num_records']} in, {entry['num_passed']} passed",
+        #         flush=True,
+        #     )
+
         total_cost = sum(r.cost_per_record for r in all_record_op_stats)
         total_input_tokens = int(sum(r.total_input_tokens for r in all_record_op_stats))
         total_output_tokens = int(sum(r.total_output_tokens for r in all_record_op_stats))
 
-        sample_lines = []
-        for stage_idx in sorted(op_samples):
-            pairs = op_samples[stage_idx]
+        op_id_to_name = {id(op): name for name, op in self._flat_ops()}
+        op_samples_dict: dict[str, list[dict]] = {}
+        for op_key, pairs in op_samples.items():
             if not pairs:
                 continue
-            op_name = f"{self.plan_name}_op{stage_idx + 1}"
-            sample_lines.append(f"{op_name}:")
-            for inp, out in pairs:
-                sample_lines.append(f"  ({_fmt_record(inp)}, {_fmt_record(out)})")
+            op_name = op_id_to_name.get(op_key)
+            if op_name is None:
+                continue
+            op_samples_dict[op_name] = [
+                {"input": _fmt_record(inp), "output": _fmt_record(out)}
+                for inp, out in pairs
+            ]
 
         plan_dict: dict = {
             "plan_name": self.plan_name,
@@ -758,7 +909,7 @@ class PhysicalPipeline:
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,
             "plan_str": str(self),
-            "op_samples": "\n".join(sample_lines),
+            "op_samples": op_samples_dict,
         }
 
         exec_stats = ExecutionStats(
@@ -773,20 +924,211 @@ class PhysicalPipeline:
         self._last_exec_stats = exec_stats
         return DataRecordCollection(records, execution_stats=exec_stats), per_op_list, plan_dict
 
-    def to_results_row(self, plan_id: str) -> dict:
-        """Return a ResultsStore-compatible dict from the most recent run().
+    # ------------------------------------------------------------------
+    # Subset execution
+    # ------------------------------------------------------------------
 
-        Captures plan-level totals only (not per-operator breakdowns).
-        Canonical columns match the ResultsStore schema in cost_model_agent:
-            plan_id, cost_usd, latency_s, input_tokens, output_tokens
+    def run_subset(
+        self,
+        num_samples: int = NUM_SAMPLES,
+        seed: int = SUBSET_SEED,
+        subset_cache_path: str | None = None,
+    ) -> tuple[list[dict], SubsetExecutionContext]:
+        """Execute on a random sample of num_samples records.
+
+        If subset_cache_path is given and the file already exists, the cached
+        rows are loaded instead of resampling.  If the file does not exist yet
+        the sample is drawn as usual and written to that path.
+
+        Returns (per_op_list, SubsetExecutionContext).
+        per_op_list: same schema as run() but stats are from the subset.
+        SubsetExecutionContext: sampled records, output records, and per-LLM-op samples
+          for use by QualityEvaluator.
         """
-        if self._last_exec_stats is None:
-            raise RuntimeError("Call run() before to_results_row()")
-        s = self._last_exec_stats
-        return {
-            "plan_id": plan_id,
-            "cost_usd": s.total_execution_cost,
-            "latency_s": s.plan_execution_time,
-            "input_tokens": int(s.total_input_tokens),
-            "output_tokens": int(s.total_output_tokens),
-        }
+        import os as _os
+        if subset_cache_path is not None and _os.path.exists(subset_cache_path):
+            sampled_df = pd.read_csv(subset_cache_path).reset_index(drop=True)
+            for col in sampled_df.columns:
+                try:
+                    sampled_df[col] = sampled_df[col].astype(self._df[col].dtype)
+                except (ValueError, TypeError):
+                    pass
+        else:
+            n = min(num_samples, len(self._df))
+            sampled_df = self._df.sample(n=n, random_state=seed).reset_index(drop=True)
+            if subset_cache_path is not None:
+                _os.makedirs(_os.path.dirname(_os.path.abspath(subset_cache_path)), exist_ok=True)
+                sampled_df.to_csv(subset_cache_path, index=False)
+        sampled_records_list = sampled_df.to_dict(orient="records")
+
+        has_join = any(op.stage_type == "join" for op in self._ops)
+        right_df_backup: dict[int, pd.DataFrame] = {}
+        right_sampled_records: list[dict] | None = None
+
+        if has_join:
+            right_sampled_records = []
+            for op in self._ops:
+                if op.stage_type == "join":
+                    other = op.other
+                    oid = id(other)
+                    if oid not in right_df_backup:
+                        right_df_backup[oid] = other._df
+                        n_r = min(num_samples, len(other._df))
+                        other._df = other._df.sample(n=n_r, random_state=seed).reset_index(drop=True)
+                    right_sampled_records.extend(other._df.to_dict(orient="records"))
+
+        try:
+            initial_records = self._build_initial_records(sampled_df)
+            records, all_record_op_stats, stage_map, op_samples = self._execute_core(
+                initial_records, max_samples=num_samples, skip_limit=True
+            )
+        finally:
+            for op in self._ops:
+                if op.stage_type == "join":
+                    oid = id(op.other)
+                    if oid in right_df_backup:
+                        op.other._df = right_df_backup[oid]
+
+        # Build per_op_list (same aggregation logic as run())
+        op_agg: dict[str, dict] = {}
+        _zero: dict = {"cost_usd": 0.0, "latency_s": 0.0, "input_tokens": 0,
+                       "output_tokens": 0, "num_records": 0, "num_passed": 0}
+        for r in all_record_op_stats:
+            lid = r.logical_op_id
+            if lid not in op_agg:
+                op_agg[lid] = dict(_zero)
+            op_agg[lid]["cost_usd"] += r.cost_per_record
+            op_agg[lid]["latency_s"] += r.time_per_record
+            op_agg[lid]["input_tokens"] += int(r.total_input_tokens)
+            op_agg[lid]["output_tokens"] += int(r.total_output_tokens)
+            op_agg[lid]["num_records"] += 1
+            op_agg[lid]["num_passed"] += int(bool(getattr(r, "passed_operator", True)))
+
+        per_op_list: list[dict] = []
+        for stage_idx in sorted(stage_map):
+            meta = stage_map[stage_idx]
+            s = op_agg.get(meta["logical_op_id"], _zero)
+            per_op_list.append({
+                "op_name": meta["op_name"],
+                "op_type": meta["op_type"],
+                "op_id": meta["params_id"],
+                "latency_s": s["latency_s"],
+                "cost_usd": s["cost_usd"],
+                "input_tokens": s["input_tokens"],
+                "output_tokens": s["output_tokens"],
+                "num_records": s["num_records"],
+                "num_passed": s["num_passed"],
+            })
+
+        # Convert output DataRecords to plain dicts
+        def _dr_to_dict(dr: DataRecord) -> dict:
+            schema_cls = dr.schema if isinstance(dr.schema, type) else type(dr.schema)
+            return {k: getattr(dr, k, None) for k in schema_cls.model_fields}
+
+        output_records = [_dr_to_dict(dr) for dr in records]
+
+        # Collect per-LLM-op info: keyed by flat_idx from _flat_ops() so that
+        # op names are consistent with per_op_list (which also uses _flat_ops() names).
+        # op_samples is keyed by id(op), so right-branch ops are included automatically.
+        per_sem_op_info: dict[int, dict] = {}
+        for flat_idx, (op_name, op) in enumerate(self._flat_ops()):
+            if "model" in op.attributes:
+                per_sem_op_info[flat_idx] = {
+                    "op_name": op_name,
+                    "op_type": op.op_type,
+                    "attributes": op.attributes,
+                    "samples": op_samples.get(id(op), []),
+                }
+
+        context = SubsetExecutionContext(
+            sampled_records=sampled_records_list,
+            output_records=output_records,
+            per_sem_op_info=per_sem_op_info,
+            has_join=has_join,
+            right_sampled_records=right_sampled_records,
+        )
+        return per_op_list, context
+
+    # ------------------------------------------------------------------
+    # Oracle copy (for QualityEvaluator)
+    # ------------------------------------------------------------------
+
+    def make_oracle_copy(self, oracle_model: "Model | str", oracle_reasoning_effort: str | None = None) -> "PhysicalPipeline":
+        """Return a copy of this pipeline with all LLM operators using oracle_model.
+
+        oracle_model may be a pz.Model enum (preferred) or a model string
+        that will be resolved via _str_to_pz_model.
+        """
+        if isinstance(oracle_model, str):
+            oracle_model = _str_to_pz_model(oracle_model)
+        oracle = PhysicalPipeline(
+            plan_name=self.plan_name + "_oracle",
+            source=self._source,
+            data=self._df,
+            max_workers=self._max_workers,
+        )
+        for op in self._ops:
+            if isinstance(op, SemFilter):
+                oracle.sem_filter(
+                    condition=op.attributes["condition"],
+                    model=oracle_model,
+                    depends_on=getattr(op, "depends_on", None),
+                    reasoning_effort_override=oracle_reasoning_effort,
+                )
+            elif isinstance(op, SemMap):
+                cols = getattr(op, "_cols_full", None)
+                if cols:
+                    oracle.sem_map(
+                        cols=cols,
+                        model=oracle_model,
+                        depends_on=getattr(op, "depends_on", None),
+                        reasoning_effort_override=oracle_reasoning_effort,
+                    )
+            elif isinstance(op, SemJoin):
+                oracle_other = op.other.make_oracle_copy(oracle_model, oracle_reasoning_effort)
+                oracle.sem_join(
+                    other=oracle_other,
+                    condition=op.attributes["condition"],
+                    model=oracle_model,
+                    join_parallelism=op.attributes.get("join_parallelism", 20),
+                    depends_on=getattr(op, "depends_on", None),
+                    reasoning_effort_override=oracle_reasoning_effort,
+                )
+            elif isinstance(op, ExactFilter):
+                fn = getattr(op, "_fn", None)
+                if fn is not None:
+                    oracle.filter(fn)
+            elif isinstance(op, Map):
+                udf = getattr(op, "_udf", None)
+                cols = getattr(op, "_cols_full", None)
+                if udf is not None and cols:
+                    oracle.map(udf, cols)
+            elif isinstance(op, Project):
+                oracle.project(op.attributes["project_cols"])
+            elif isinstance(op, Limit):
+                oracle.limit(op.attributes["limit"])
+            elif isinstance(op, GroupBy):
+                group_by_fields = op.attributes["group_by_fields"]
+                agg_pairs = list(op.attributes["agg_pairs"])
+                agg_funcs = [p[0] for p in agg_pairs]
+                agg_fields = [p[1] for p in agg_pairs]
+                oracle.groupby(group_by_fields, agg_funcs, agg_fields)
+        return oracle
+
+    # def to_results_row(self, plan_id: str) -> dict:
+    #     """Return a ResultsStore-compatible dict from the most recent run().
+
+    #     Captures plan-level totals only (not per-operator breakdowns).
+    #     Canonical columns match the ResultsStore schema in cost_model_agent:
+    #         plan_id, cost_usd, latency_s, input_tokens, output_tokens
+    #     """
+    #     if self._last_exec_stats is None:
+    #         raise RuntimeError("Call run() before to_results_row()")
+    #     s = self._last_exec_stats
+    #     return {
+    #         "plan_id": plan_id,
+    #         "cost_usd": s.total_execution_cost,
+    #         "latency_s": s.plan_execution_time,
+    #         "input_tokens": int(s.total_input_tokens),
+    #         "output_tokens": int(s.total_output_tokens),
+    #     }
