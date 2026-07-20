@@ -26,8 +26,10 @@ import argparse
 import os
 from dataclasses import dataclass
 import json
+import pandas as pd
 
 from cost_model_agent import CostModelAgent, OpenRouterClient, ResultsStore
+from llm_sampler import LLM_Sampler
 
 
 # ---------------------------------------------------------------------------
@@ -165,8 +167,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--offline", action="store_true", help="use the scripted LLM (no API key)")
     ap.add_argument("--model", default="openai/gpt-5.4", help="OpenRouter model id")
-    ap.add_argument("--max-steps", type=int, default=12)
+    ap.add_argument("--helper-model", default="openai/gpt-5.4", help="OpenRouter model id for the cost helper agent (customCost mode); defaults to --model")
+    ap.add_argument("--max-steps", type=int, default=40, help="max steps for the main agent (cost helper has its own max)")
     ap.add_argument("--runcount", type=int, default=None, help="run index; saves result under key '<query_id>_<runcount>' instead of overwriting '<query_id>'")
+    ap.add_argument("--embedding-model", default=None, help="embedding model id for LLM_Sampler; when set, the quality-eval subset is drawn by LLM-guided sampling instead of at random. Which modalities are embedded is read from the `modalities` map below; use a multimodal model for queries whose modality includes 'image'.")
+    ap.add_argument("--sample-method", choices=["importance-sampling", "topk"], default="importance-sampling", help="how LLM_Sampler picks rows from cosine-similarity scores: 'importance-sampling' (weighted random draw) or 'topk' (highest-scoring rows)")
+    ap.add_argument("--keyword", action="store_true", help="add +1 to a row's similarity if any full word of the LLM target text appears in the row's text data (full-word match)")
     args = ap.parse_args()
 
     # plans = build_plans()
@@ -175,16 +181,63 @@ def main() -> None:
     op_results = ResultsStore([])
     plan_results = ResultsStore([])
 
-    agent_type = "execute_oracle"
+    # agent_type = "execute_oracle"
+    agent_type = "customCost_oracle_helper"
     USE_CASE = "ecomm"
     llm = ScriptedLLM() if args.offline else OpenRouterClient(args.model, reasoning_effort="medium")
-    agent = CostModelAgent(llm, max_steps=args.max_steps, verbose=True, agent_dir=f"{agent_type}_agent", use_case = USE_CASE)
+    agent = CostModelAgent(llm, max_steps=args.max_steps, verbose=True, agent_dir=f"{agent_type}_agent", use_case = USE_CASE, helper_model=args.helper_model)
 
 
-    query_id = 12
+    query_id = 6
+    source_data = f"styles_details_image.csv"
+    # Per-query modality: drives whether the sampler embeds/compares text, images, or both.
+    modalities = {
+        **{q: "image and text" for q in [8, 11, 12, 13, 14]},
+        **{q: "text" for q in [1, 3, 5, 7]},
+        **{q: "image" for q in [2, 4, 6, 9, 10]},
+    }
     tasks = {
+        1: """Based on the textual description and the title of the product,
+            find the `prod_id` of products that are backpacks from Reebok.""",
+        2: """Based on the image representation of the product,
+            find the `prod_id` of products where the image shows
+            a pair of sports shoes that are predominantly yellow and silver.""",
+        3: """For each product, extract the brand name from the product description and title.
+            Return the product id and the brand in a column titled 'category'.""",
         4: """For each product, use the image to extract the primary color of the depicted product.
             Return `prod_id` and the primary color in a column titled 'category'.""",
+        5: """Based solely on the title and description of the product, classify each product into one of the following categories:
+            Dress: A dress is a one-piece outer garment that is worn on the torso, hangs down over the legs, and often consist of a bodice attached to a skirt.
+            Bottomwear: Bottomwear refers to clothing worn on the lower part of the body, such as trousers, jeans, skirts, shorts, and leggings.
+            Socks: Socks are a type of clothing worn on the feet, typically made of soft fabric, designed to provide comfort and warmth.
+            Topwear: Topwear refers to clothing worn on the upper part of the body, such as shirts, blouses, t-shirts, and jackets.
+            Innerwear: Innerwear refers to clothing worn beneath outer garments, typically close to the skin, such as underwear, bras, and undershirts.
+            Each product can only have one category.
+            Return `prod_id` and the category.""",
+        6: """Based solely on the image of the product, classify each product into one of the following categories:
+            Dress: A dress is a one-piece outer garment that is worn on the torso, hangs down over the legs, and often consist of a bodice attached to a skirt.
+            Bottomwear: Bottomwear refers to clothing worn on the lower part of the body, such as trousers, jeans, skirts, shorts, and leggings.
+            Socks: Socks are a type of clothing worn on the feet, typically made of soft fabric, designed to provide comfort and warmth.
+            Topwear: Topwear refers to clothing worn on the upper part of the body, such as shirts, blouses, t-shirts, and jackets.
+            Innerwear: Innerwear refers to clothing worn beneath outer garments, typically close to the skin, such as underwear, bras, and undershirts.
+            Each product can only have one category.
+            Return `prod_id` and the category.""",
+        7: """Find all pairs of products priced at $500 or less where both products
+            are of the same category and from the same brand based on their descriptions.
+            Return the two `prod_id` columns in this order: first product's `prod_id`, second product's `prod_id`.""",
+        8: """Perform a self-join of the dataset.
+            For each product with a product description having at least 3000 characters,
+            find the matching product images based on the title and the description
+            of the product.""",
+        9: """Based on product images, find pairs of distinct products under $800
+            in a single base color (Black, Blue, Red, White, Orange, or Green)
+            that depict objects of the same category and the same dominant surface color.
+            Return the two `prod_id` columns in this order: first product's `prod_id`, second product's `prod_id`.""",
+        10: """Based on product images, find matching outfits consisting of shoes,
+            bottomwear, and topwear in Black, Blue, Red, or White,
+            where all three items are from the same brand, same color,
+            and each is priced at $1000 or less. Return the three `prod_id` columns in
+            this order: shoes `prod_id`, bottomwear `prod_id`, topwear `prod_id`.""",
         11: """Based on product images and descriptions, find matching all-black outfits
             consisting of shoes, bottomwear (excluding swimwear), topwear (excluding swimwear),
             and an accessory (watch, jewellery, or bag priced at $500 or less),
@@ -196,33 +249,70 @@ def main() -> None:
         13: """Based on product images and descriptions, find men's running shirts
             with round neck and short sleeves, in blue or black (not bright colors
             like white, and definitely not green), with a striped design,
-            suitable for outdoor running in warm weather. Return prod_id."""
+            suitable for outdoor running in warm weather. Return prod_id.""",
+        14: """For each fashion product that costs less than 130,
+            find the single image that best matches the product's textual description
+            (including the product name and full description),
+            but only if that image also depicts white socks."""
     }
     task = tasks[query_id]
     # with open(f"files/movie/query/natural_language/Q{query_id}.txt") as f:
     #     task = f.read().strip()
-    answer = agent.run(task, plans,
-                       plan_results = plan_results,
-                       op_results = op_results,
-                       mode = agent_type,
-                       query_info={
-                            "use_case": USE_CASE,
-                            "scale_factor": 500,
-                            "query_id": query_id,
-                            "data_dir": f"agent_cost_model/dataset/{USE_CASE}",
-                            "gt_dir": f"files/{USE_CASE}/raw_results/ground_truth",
-                        "runcount": args.runcount,
-                        })
 
-    print("\n=== FINAL ANSWER ===")
-    print(answer)
-    qkey = f"Q{query_id}_{args.runcount}" if args.runcount is not None else f"Q{query_id}"
-    output_path = f"agent_cost_model/final_answer/{USE_CASE}/{agent_type}_agent/{qkey}.json"
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(answer, f, indent=2)
-    print("\n=== observed-results store after run ===")
-    print(op_results.summary())
+    data_dir = f"agent_cost_model/dataset/{USE_CASE}"
+
+    # LLM-guided importance sampling of the quality-eval subset. Runs BEFORE the
+    # agent and simply overwrites Q{id}_subset.csv, which PhysicalPipeline.run_subset
+    # reads on its cache-hit path. When --embedding-model is omitted, the agent
+    # falls back to its default random subset. Independent of the agent (no shared
+    # state); all cost/latency/sample results are logged to sampling/{use_case}/results.json.
+    if args.embedding_model:
+        source_df = pd.read_csv(os.path.join(data_dir, source_data))
+        modality = modalities[query_id]
+        # Modality is the single source of truth for which embeddings are used:
+        #   - image_dir set  => per-row image embeddings + image cosine similarity
+        #   - text_cols=[]   => no text embeddings and text excluded from cosine similarity
+        #     (overrides any text columns present in the source CSV)
+        image_dir = os.path.join(data_dir, "images") if "image" in modality else None
+        text_cols = None if "text" in modality else []
+        sampler = LLM_Sampler(
+            query_id=query_id,
+            use_case=USE_CASE,
+            query_text=task,
+            df=source_df,
+            llm_client=llm,
+            embedding_model=args.embedding_model,
+            image_dir=image_dir,
+            text_cols=text_cols,
+            sample_method=args.sample_method,
+            keyword=args.keyword,
+        )
+        sampled_ids = sampler.sample()
+        print(f"\n=== LLM_Sampler subset ({len(sampled_ids)} rows) -> {sampler.subset_out_path} ===")
+        print(sampled_ids)
+
+    # answer = agent.run(task, plans,
+    #                    plan_results = plan_results,
+    #                    op_results = op_results,
+    #                    mode = agent_type,
+    #                    query_info={
+    #                         "use_case": USE_CASE,
+    #                         "scale_factor": 500,
+    #                         "query_id": query_id,
+    #                         "data_dir": data_dir,
+    #                         "gt_dir": f"files/{USE_CASE}/raw_results/ground_truth",
+    #                     "runcount": args.runcount,
+    #                     })
+
+    # print("\n=== FINAL ANSWER ===")
+    # print(answer)
+    # qkey = f"Q{query_id}_{args.runcount}" if args.runcount is not None else f"Q{query_id}"
+    # output_path = f"agent_cost_model/final_answer/{USE_CASE}/{agent_type}_agent/{qkey}.json"
+    # os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    # with open(output_path, "w") as f:
+    #     json.dump(answer, f, indent=2)
+    # print("\n=== observed-results store after run ===")
+    # print(op_results.summary())
 
 
 if __name__ == "__main__":
