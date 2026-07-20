@@ -11,12 +11,48 @@ Oracle plan output is cached per plan_name in llm_judge_dir.
 """
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
+
+def normalize_eval_df(df: pd.DataFrame, use_case: str, query_id: int) -> pd.DataFrame:
+    """Apply use-case/query-specific column normalization for evaluator compatibility.
+
+    Shared by the plan-output and oracle/ground-truth paths so their id columns
+    always line up. Mirrors the per-query dialect output shape expected by the
+    scenario evaluators.
+    """
+    if use_case == "ecomm":
+        if query_id in (2, 4, 5):
+            df = df.rename(columns={"prod_id": "id"})
+        elif query_id == 7:
+            df["id"] = df.iloc[:, :2].astype(str).agg("-".join, axis=1)
+            df = df[["id"]]
+        elif query_id == 11:
+            if df.shape[1] >= 4:
+                df["id"] = df.iloc[:, :4].astype(str).agg("-".join, axis=1)
+                df = df[["id"]]
+        elif query_id == 12:
+            if df.shape[1] >= 3:
+                df["id"] = df.iloc[:, :3].apply(
+                    lambda r: json.dumps(
+                        {"id": int(r.iloc[0]), "brand": r.iloc[1], "category": r.iloc[2]},
+                        separators=(",", ":"),
+                    ),
+                    axis=1,
+                )
+                df = df[["id"]]
+        elif query_id == 13:
+            df = df.rename(columns={"prod_id": "id"})
+            df = df[["id"]] if "id" in df.columns else df
+    return df
+
 
 def _load_evaluator(use_case: str, scale_factor: int, agent_dir: str):
     """Import and instantiate the concrete evaluator for the given use_case."""
@@ -206,27 +242,7 @@ class QualityEvaluator:
 
     def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply use-case/query-specific column normalization (mirrors ExecutePlanTool)."""
-        if self._use_case == "ecomm":
-            if self._query_id == 4:
-                df = df.rename(columns={"prod_id": "id"})
-            elif self._query_id == 11:
-                if df.shape[1] >= 4:
-                    df["id"] = df.iloc[:, :4].astype(str).agg("-".join, axis=1)
-                    df = df[["id"]]
-            elif self._query_id == 12:
-                if df.shape[1] >= 3:
-                    df["id"] = df.iloc[:, :3].apply(
-                        lambda r: json.dumps(
-                            {"id": int(r.iloc[0]), "brand": r.iloc[1], "category": r.iloc[2]},
-                            separators=(",", ":"),
-                        ),
-                        axis=1,
-                    )
-                    df = df[["id"]]
-            elif self._query_id == 13:
-                df = df.rename(columns={"prod_id": "id"})
-                df = df[["id"]] if "id" in df.columns else df
-        return df
+        return normalize_eval_df(df, self._use_case, self._query_id)
 
     # ------------------------------------------------------------------
     # Op-level decision caching
@@ -300,11 +316,15 @@ class QualityEvaluator:
             return None
         return sum(1 for k in common if plan_dec[k] == oracle_dec[k]) / len(common)
 
-    def _oracle_generate(self, prompt: str) -> str:
-        """Call oracle client; handle both str and (str, reasoning) return types."""
+    def _oracle_generate(self, content: str | list) -> str:
+        """Call oracle client; handle both str and (str, reasoning) return types.
+
+        `content` may be a plain string or an OpenAI-style multimodal content
+        list (mix of {"type": "text", ...} and {"type": "image_url", ...} parts).
+        """
         result = self._oracle_client.generate(
             system="You are a rigorous evaluator. Return only valid JSON.",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": content}],
         )
         if isinstance(result, tuple):
             if len(result) >= 3 and isinstance(result[2], dict):
@@ -312,8 +332,37 @@ class QualityEvaluator:
             return result[0]
         return result
 
+    _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
+
+    @classmethod
+    def _maybe_image_url(cls, value) -> str | None:
+        """If `value` is a path to an image file, return a base64 data URL; else None.
+
+        sem_map inputs of type ImageFilepath hold the on-disk path to the image.
+        The oracle judge call is otherwise text-only, so without this the oracle
+        never sees the pixels and scores vision maps ~0.
+        """
+        if not isinstance(value, str):
+            return None
+        if os.path.splitext(value)[1].lower() not in cls._IMAGE_EXTS:
+            return None
+        try:
+            if not os.path.isfile(value):
+                return None
+            with open(value, "rb") as f:
+                data = f.read()
+            mime = mimetypes.guess_type(value)[0] or "image/jpeg"
+            b64 = base64.b64encode(data).decode("ascii")
+            return f"data:{mime};base64,{b64}"
+        except Exception:
+            return None
+
     def _score_map_op(self, info: dict) -> float | None:
-        """Oracle judges whether plan's sem_map output fields are correct (batched call)."""
+        """Oracle judges whether plan's sem_map output fields are correct (batched call).
+
+        Image-valued input fields are attached to the judge call as vision
+        inputs so the oracle can actually verify vision-derived output fields.
+        """
         samples = info["samples"]
         cols_names: list[str] = info["attributes"].get("cols", [])
         if not cols_names:
@@ -330,30 +379,52 @@ class QualityEvaluator:
             schema_cls = dr.schema if isinstance(dr.schema, type) else type(dr.schema)
             return {k: getattr(dr, k, None) for k in schema_cls.model_fields}
 
-        record_texts: list[str] = []
+        n_fields = len(cols_names)
+        # Build an OpenAI-style multimodal content list: per-record text, with any
+        # image-valued input fields attached as image_url parts right after it.
+        content: list[dict] = [{
+            "type": "text",
+            "text": (
+                "You are evaluating whether a semantic map operator produced correct outputs.\n"
+                f"Output fields to evaluate: {cols_names}"
+            ),
+        }]
         for i, (inp, out) in enumerate(valid):
             inp_d = _dr_to_dict(inp)
             out_d = _dr_to_dict(out)
             mapped = {k: out_d.get(k) for k in cols_names if k in out_d}
-            record_texts.append(
-                f"Record {i}:\n"
-                f"  INPUT: {json.dumps(inp_d, default=str)}\n"
-                f"  OPERATOR output fields {cols_names}: {json.dumps(mapped, default=str)}"
-            )
+            image_urls: list[str] = []
+            text_inp: dict = {}
+            for k, v in inp_d.items():
+                url = self._maybe_image_url(v)
+                if url is not None:
+                    text_inp[k] = "<image attached below>"
+                    image_urls.append(url)
+                else:
+                    text_inp[k] = v
+            content.append({
+                "type": "text",
+                "text": (
+                    f"\nRecord {i}:\n"
+                    f"  INPUT: {json.dumps(text_inp, default=str)}\n"
+                    f"  OPERATOR output fields {cols_names}: {json.dumps(mapped, default=str)}"
+                ),
+            })
+            for url in image_urls:
+                content.append({"type": "image_url", "image_url": {"url": url}})
 
-        n_fields = len(cols_names)
-        prompt = (
-            "You are evaluating whether a semantic map operator produced correct outputs.\n\n"
-            f"Output fields to evaluate: {cols_names}\n\n"
-            + "\n\n".join(record_texts)
-            + f"\n\nFor each record and each output field, score 1 if correct, 0 if incorrect.\n"
-            f"Return ONLY valid JSON: "
-            f'{{\"scores\": [[field0_rec0, field1_rec0, ...], [field0_rec1, ...], ...]}} '
-            f"with {len(valid)} inner lists each of length {n_fields}."
-        )
+        content.append({
+            "type": "text",
+            "text": (
+                f"\n\nFor each record and each output field, score 1 if correct, 0 if incorrect.\n"
+                f"Return ONLY valid JSON: "
+                f'{{\"scores\": [[field0_rec0, field1_rec0, ...], [field0_rec1, ...], ...]}} '
+                f"with {len(valid)} inner lists each of length {n_fields}."
+            ),
+        })
 
         try:
-            response = self._oracle_generate(prompt)
+            response = self._oracle_generate(content)
             m = re.search(r"\{.*\}", response, re.DOTALL)
             if not m:
                 return None
