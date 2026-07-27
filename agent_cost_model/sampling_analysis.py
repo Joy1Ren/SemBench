@@ -30,14 +30,16 @@ from llm_sampler import LLM_Sampler
 
 # ============================ EDIT PER QUERY ============================
 USE_CASE    = "ecomm"
-QUERY_ID    = "4"                                # results.json key for this query
-QUERY       = "blue"              # description the sampler embeds
-MODALITIES  = ["image"]                         # subset of {"text", "image"} to score on
+SCALE_FACTOR = 500                                # dataset scale factor (dataset/{use_case}/sf_{sf})
+QUERY_ID    = "11"                                # results.json key for this query
+QUERY       = "black. watch, jewellery, jewelry, bag, purse, handbag"             # description the sampler embeds
+MODALITIES  = ["text", "image"]                         # subset of {"text", "image"} to score on
 # GT = [10037, 10102, 3312, 3462, 41825]  # 2
-GT          = pd.read_csv("agent_cost_model/styles_details_blue.csv")['prod_id'].tolist()  # ground-truth ids for this query
+GT          = pd.read_csv("agent_cost_model/styles_details_blackbags.csv")['prod_id'].tolist()  # ground-truth ids for this query
 # GT = [1623, 5299, 5300, 5303, 5314, 1624, 5301] #1
-FILTER      = ""                          # optional row predicate, e.g. 'row["price"] <= 500'; empty = no filter
-KEYWORD     = False                           # +1.0 per QUERY concept group present in a row ('.'=AND groups, ','=OR synonyms)
+# GT = [3479, 4811, 12799, 2045, 2048, 2606, 2607, 4038, 43047, 4800, 4805, 4817] #13
+FILTER      = "row[\"price\"] <= 500"                         # optional row predicate, e.g. 'row["price"] <= 500'; empty = no filter
+KEYWORD     = True                           # +1.0 per QUERY concept group matched in a row ('.'=AND concepts, ','=OR synonym phrases; phrases match contiguously)
 
 EMBED_MODEL = "google/gemini-embedding-2"      # must match the cached embedding space
 SAMPLE_SIZE = 10                               # llm_sampler.NUM_SAMPLES
@@ -50,8 +52,8 @@ SLUG      = re.sub(r"[^A-Za-z0-9._-]", "_", EMBED_MODEL)
 CACHE_DIR = f"agent_cost_model/sampling/{USE_CASE}/cached_results"
 SHARED    = f"{CACHE_DIR}/{SLUG}_embeddings.npz"     # shared cache: ids/text + image_ids/image
 RESULTS   = f"agent_cost_model/sampling/{USE_CASE}/results.json"
-PLOT_OUT  = f"agent_cost_model/sampling/{USE_CASE}/Q{QUERY_ID}_blue_{'keyword+cos' if KEYWORD else 'cos'}_cdf.png"
-SOURCE_CSV = f"agent_cost_model/dataset/{USE_CASE}/styles_details_Q4.csv"  # row attributes for FILTER
+PLOT_OUT  = f"agent_cost_model/sampling/{USE_CASE}/Q{QUERY_ID}_blackbags_{'keyword+cos' if KEYWORD else 'cos'}_cdf.png"
+SOURCE_CSV = f"agent_cost_model/dataset/{USE_CASE}/sf_{SCALE_FACTOR}/styles_details.csv" 
 ID_COL     = "prod_id"                              # key linking source rows to embedding ids
 BASE_URL  = "https://openrouter.ai/api/v1"
 API_KEY   = os.environ.get("OPENROUTER_API_KEY")
@@ -105,7 +107,7 @@ if not os.path.exists(SOURCE_CSV):
 _src = pd.read_csv(SOURCE_CSV)
 _rows = {int(r[ID_COL]): r for _, r in _src.iterrows()}             # id -> row Series
 _sampler = LLM_Sampler(
-    query_id=QUERY_ID, use_case=USE_CASE, query_text=QUERY, df=_src,
+    query_id=QUERY_ID, use_case=USE_CASE, scale_factor=SCALE_FACTOR, query_text=QUERY, df=_src,
     llm_client=None, embedding_model=EMBED_MODEL, id_col=ID_COL,
     sample_size=SAMPLE_SIZE, seed=SEED,
     api_key=API_KEY or "unused",  # placeholder: we only call its pure helpers, never its embed/HTTP methods
@@ -163,21 +165,24 @@ for m in MODALITIES:
     per_mod[m] = {mids[i]: float(dots[i]) for i in range(len(mids))}
 sims = {rid: sum(per_mod[m].get(rid, 0.0) for m in MODALITIES) for rid in POOL}
 
-# --------------------- optional keyword boost (+1.0 per matching concept group)
-# Mirrors llm_sampler's keyword flag: split QUERY into concept groups (period "."
-# separates concepts / AND, comma "," lists synonyms / OR) and add +1.0 for EACH
-# group that has >=1 word present in the row's text. e.g. "black. watch, bag":
-# a row containing "black" and "bag" hits both groups -> +2.0.
+# -------------------- optional keyphrase boost (+1.0 per matching concept group)
+# Mirrors llm_sampler's keyword flag: split QUERY into concept groups of phrases
+# (period "." separates concepts / AND, comma "," lists synonym phrases / OR) and
+# add +1.0 for EACH group with >=1 phrase present in the row's text. Phrases match
+# as contiguous full-word units, e.g. "crew neck" hits only if both words appear
+# together. e.g. "men's. round neck, crew neck": a row with "men s" and "crew
+# neck" hits both groups -> +2.0.
 kw_boosted = set()
 if KEYWORD:
     target_groups = _sampler._target_groups(QUERY)
     for rid in POOL:
-        row_words = _sampler._row_keyword_words(_rows[rid])
-        n_hits = sum(1 for g in target_groups if g & row_words)
+        row_text = _sampler._row_keyword_text(_rows[rid])   # normalized, space-padded
+        n_hits = sum(1 for phrases in target_groups
+                     if any(f" {p} " in row_text for p in phrases))
         if n_hits:
             sims[rid] += n_hits
             kw_boosted.add(rid)
-    print(f"keyword boost {[sorted(g) for g in target_groups]}: +1.0/group to "
+    print(f"keyphrase boost {target_groups}: +1.0/group to "
           f"{len(kw_boosted)} of {N} rows ({len(kw_boosted & set(GT))} of them GT)")
 
 vals = np.array(sorted(sims.values(), reverse=True))
@@ -187,7 +192,7 @@ def rank(s):  return int((vals > s).sum()) + 1
 def pct(s):   return 100 * (vals < s).mean()
 
 
-label = " + ".join(f"cos(query, {m})" for m in MODALITIES) + (" + keyword_group_hits" if KEYWORD else "")
+label = " + ".join(f"cos(query, {m})" for m in MODALITIES) + (" + keyphrase_group_hits" if KEYWORD else "")
 print(f"=== score = {label}   distribution over {N} rows ===")
 print(f"max={vals[0]:.4f}  p95={np.percentile(vals,95):.4f}  p90={np.percentile(vals,90):.4f}"
       f"  median={np.median(vals):.4f}  min={vals[-1]:.4f}\n")
