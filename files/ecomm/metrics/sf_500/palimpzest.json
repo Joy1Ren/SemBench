@@ -1,0 +1,497 @@
+{
+  "1_1": {
+    "query_id": 1,
+    "scale_factor": 500,
+    "latency": 17.161,
+    "cost": 0.152041,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "1_2": {
+    "query_id": 1,
+    "scale_factor": 500,
+    "latency": 17.4466,
+    "cost": 0.151974,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "1_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 1,
+    "scale_factor": 500,
+    "latency": 24.3986,
+    "cost": 0.151999,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "1_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 1,
+    "scale_factor": 500,
+    "latency": 17.3314,
+    "cost": 0.151911,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "1_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 1,
+    "scale_factor": 500,
+    "latency": 16.7497,
+    "cost": 0.039896,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "1_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 1,
+    "scale_factor": 500,
+    "latency": 14.733,
+    "cost": 0.039929,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "1_GOOGLE_GEMINI_2_5_PRO_1": {
+    "query_id": 1,
+    "scale_factor": 500,
+    "latency": 277.9697,
+    "cost": 4.07755,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_PRO"
+  },
+  "1_GOOGLE_GEMINI_2_5_PRO_2": {
+    "query_id": 1,
+    "scale_factor": 500,
+    "latency": 166.0989,
+    "cost": 4.072376,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_PRO"
+  },
+  "2_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 2,
+    "scale_factor": 500,
+    "latency": 226.1223,
+    "cost": 0.364052,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "2_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 2,
+    "scale_factor": 500,
+    "latency": 238.0007,
+    "cost": 0.362782,
+    "metric_type": "f1_score",
+    "quality": 0.007692307692307693,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "2_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 2,
+    "scale_factor": 500,
+    "latency": 16.1917,
+    "cost": 0.02908,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "2_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 2,
+    "scale_factor": 500,
+    "latency": 15.1291,
+    "cost": 0.029092,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "3_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 3,
+    "scale_factor": 500,
+    "latency": 12.9805,
+    "cost": 0.117154,
+    "metric_type": "accuracy",
+    "quality": 0.8643038547973366,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "3_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 3,
+    "scale_factor": 500,
+    "latency": 13.6862,
+    "cost": 0.117154,
+    "metric_type": "accuracy",
+    "quality": 0.8643038547973366,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "3_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 3,
+    "scale_factor": 500,
+    "latency": 11.9749,
+    "cost": 0.034861,
+    "metric_type": "accuracy",
+    "quality": 0.9058394413456573,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "3_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 3,
+    "scale_factor": 500,
+    "latency": 11.5033,
+    "cost": 0.034861,
+    "metric_type": "accuracy",
+    "quality": 0.9070026421457654,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "4_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 4,
+    "scale_factor": 500,
+    "latency": 23.0577,
+    "cost": 0.247543,
+    "metric_type": "accuracy",
+    "quality": 0.7153176788128992,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "4_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 4,
+    "scale_factor": 500,
+    "latency": 22.9496,
+    "cost": 0.247546,
+    "metric_type": "accuracy",
+    "quality": 0.7081357955595095,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "4_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 4,
+    "scale_factor": 500,
+    "latency": 25.799,
+    "cost": 0.080193,
+    "metric_type": "accuracy",
+    "quality": 0.6075482574359745,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "4_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 4,
+    "scale_factor": 500,
+    "latency": 24.0046,
+    "cost": 0.080193,
+    "metric_type": "accuracy",
+    "quality": 0.5869656135752924,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "5_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 5,
+    "scale_factor": 500,
+    "latency": 13.0188,
+    "cost": 0.148439,
+    "metric_type": "accuracy",
+    "quality": 0.9834218113056721,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "5_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 5,
+    "scale_factor": 500,
+    "latency": 12.593,
+    "cost": 0.148436,
+    "metric_type": "accuracy",
+    "quality": 0.9834218113056721,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "5_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 5,
+    "scale_factor": 500,
+    "latency": 11.5367,
+    "cost": 0.045394,
+    "metric_type": "accuracy",
+    "quality": 0.9794175205819398,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "5_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 5,
+    "scale_factor": 500,
+    "latency": 11.6425,
+    "cost": 0.045394,
+    "metric_type": "accuracy",
+    "quality": 0.9794175205819398,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "6_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 6,
+    "scale_factor": 500,
+    "latency": 36.6734,
+    "cost": 0.438904,
+    "metric_type": "accuracy",
+    "quality": 0.9552859298105925,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "6_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 6,
+    "scale_factor": 500,
+    "latency": 37.8323,
+    "cost": 0.438904,
+    "metric_type": "accuracy",
+    "quality": 0.9552859298105925,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "6_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 6,
+    "scale_factor": 500,
+    "latency": 39.5963,
+    "cost": 0.142194,
+    "metric_type": "accuracy",
+    "quality": 0.8370798357051616,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "6_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 6,
+    "scale_factor": 500,
+    "latency": 35.9677,
+    "cost": 0.142192,
+    "metric_type": "accuracy",
+    "quality": 0.8404767438614642,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "7_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 7,
+    "scale_factor": 500,
+    "latency": 324.2407,
+    "cost": 4.271583,
+    "metric_type": "f1_score",
+    "quality": 0.9046321525885558,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "7_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 7,
+    "scale_factor": 500,
+    "latency": 328.3773,
+    "cost": 4.271596,
+    "metric_type": "f1_score",
+    "quality": 0.9046321525885558,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "7_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 7,
+    "scale_factor": 500,
+    "latency": 238.562,
+    "cost": 1.00789,
+    "metric_type": "f1_score",
+    "quality": 0.9243243243243243,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "7_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 7,
+    "scale_factor": 500,
+    "latency": 232.6015,
+    "cost": 1.00818,
+    "metric_type": "f1_score",
+    "quality": 0.9264305177111716,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "8_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 8,
+    "scale_factor": 500,
+    "latency": 1.7474,
+    "cost": 0.001353,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "8_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 8,
+    "scale_factor": 500,
+    "latency": 1.6464,
+    "cost": 0.001353,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "8_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 8,
+    "scale_factor": 500,
+    "latency": 1.6833,
+    "cost": 0.000334,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "8_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 8,
+    "scale_factor": 500,
+    "latency": 1.389,
+    "cost": 0.000334,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "9_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 9,
+    "scale_factor": 500,
+    "latency": 250.1271,
+    "cost": 2.250713,
+    "metric_type": "f1_score",
+    "quality": 0.02106084243369735,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "9_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 9,
+    "scale_factor": 500,
+    "latency": 0.0908,
+    "cost": 0.0,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "9_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 9,
+    "scale_factor": 500,
+    "latency": 131.2039,
+    "cost": 0.335331,
+    "metric_type": "f1_score",
+    "quality": 0.036036036036036036,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "9_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 9,
+    "scale_factor": 500,
+    "latency": 135.3276,
+    "cost": 0.338141,
+    "metric_type": "f1_score",
+    "quality": 0.018018018018018018,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "10_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 10,
+    "scale_factor": 500,
+    "latency": 1667.4068,
+    "cost": 41.316571,
+    "metric_type": "f1_score",
+    "quality": 0.014851485148514853,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "10_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 10,
+    "scale_factor": 500,
+    "latency": 12.3223,
+    "cost": 0.068488,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "10_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 10,
+    "scale_factor": 500,
+    "latency": 12.2443,
+    "cost": 0.068001,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "11_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 11,
+    "scale_factor": 500,
+    "latency": 124.8457,
+    "cost": 3.50421,
+    "metric_type": "f1_score",
+    "quality": 0.8,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "11_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 11,
+    "scale_factor": 500,
+    "latency": 158.985,
+    "cost": 3.504585,
+    "metric_type": "f1_score",
+    "quality": 0.8,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "11_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 11,
+    "scale_factor": 500,
+    "latency": 125.8092,
+    "cost": 0.975574,
+    "metric_type": "f1_score",
+    "quality": 0.8,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "11_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 11,
+    "scale_factor": 500,
+    "latency": 793.0811,
+    "cost": 0.974989,
+    "metric_type": "f1_score",
+    "quality": 0.8,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "12_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 12,
+    "scale_factor": 500,
+    "latency": 22.7366,
+    "cost": 0.210882,
+    "metric_type": "f1_score",
+    "quality": 0.9586776859504132,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "12_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 12,
+    "scale_factor": 500,
+    "latency": 22.2474,
+    "cost": 0.210872,
+    "metric_type": "f1_score",
+    "quality": 0.9586776859504132,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "12_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 12,
+    "scale_factor": 500,
+    "latency": 21.8026,
+    "cost": 0.061495,
+    "metric_type": "f1_score",
+    "quality": 0.9586776859504132,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "12_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 12,
+    "scale_factor": 500,
+    "latency": 19.8573,
+    "cost": 0.061615,
+    "metric_type": "f1_score",
+    "quality": 0.9586776859504132,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "13_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 13,
+    "scale_factor": 500,
+    "latency": 34.5146,
+    "cost": 0.332094,
+    "metric_type": "f1_score",
+    "quality": 0.6086956521739131,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "13_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 13,
+    "scale_factor": 500,
+    "latency": 36.906,
+    "cost": 0.333034,
+    "metric_type": "f1_score",
+    "quality": 0.6086956521739131,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "13_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 13,
+    "scale_factor": 500,
+    "latency": 19.519,
+    "cost": 0.057268,
+    "metric_type": "f1_score",
+    "quality": 0.6,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "13_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 13,
+    "scale_factor": 500,
+    "latency": 17.6879,
+    "cost": 0.056912,
+    "metric_type": "f1_score",
+    "quality": 0.6,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  }
+}

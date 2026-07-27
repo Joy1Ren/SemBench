@@ -1,0 +1,332 @@
+{
+  "1": {
+    "query_id": "1",
+    "target_latency": 5.307674,
+    "embedding_latency": 481.782479,
+    "target_cost": 0.008106,
+    "embedding_cost": 0.1164018,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      5303,
+      5314,
+      5300,
+      1623,
+      5299,
+      5301,
+      1624,
+      1614,
+      41845,
+      22548
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "Reebok. backpack, knapsack, rucksack"
+      }
+    ]
+  },
+  "3": {
+    "query_id": "3",
+    "target_latency": 20.723889,
+    "embedding_latency": 0.0,
+    "target_cost": 0.043865,
+    "embedding_cost": 0.0,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      19600,
+      38948,
+      1977,
+      27208,
+      57488,
+      56541,
+      31593,
+      20523,
+      31308,
+      48391
+    ],
+    "targets": []
+  },
+  "4": {
+    "query_id": "4",
+    "target_latency": 3.11637,
+    "embedding_latency": 0.0,
+    "target_cost": 0.0018225,
+    "embedding_cost": 0.0,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      19600,
+      36896,
+      19744,
+      25462,
+      5666,
+      5537,
+      2975,
+      20772,
+      31308,
+      46175
+    ],
+    "targets": []
+  },
+  "5": {
+    "query_id": "5",
+    "target_latency": 13.38405,
+    "embedding_latency": 239.526107,
+    "target_cost": 0.0335025,
+    "embedding_cost": 0.0607804,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      27227,
+      9927,
+      1614,
+      15005,
+      11296,
+      1567,
+      48412,
+      50978,
+      28123,
+      45630
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "dress, frock, gown"
+      },
+      {
+        "filter": null,
+        "description": "shirt, blouse, tunic, top"
+      },
+      {
+        "filter": null,
+        "description": "t-shirt, tee, polo"
+      },
+      {
+        "filter": null,
+        "description": "jacket, sweatshirt, sweater, hoodie"
+      },
+      {
+        "filter": null,
+        "description": "jeans, trousers, pants"
+      },
+      {
+        "filter": null,
+        "description": "skirt, shorts, leggings"
+      },
+      {
+        "filter": null,
+        "description": "socks, ankle socks, crew socks"
+      },
+      {
+        "filter": null,
+        "description": "bra, brassiere, camisole, slip"
+      },
+      {
+        "filter": null,
+        "description": "underwear, briefs, panties, boxers"
+      }
+    ]
+  },
+  "6": {
+    "query_id": "6",
+    "target_latency": 2.508225,
+    "embedding_latency": 0.0,
+    "target_cost": 0.002175,
+    "embedding_cost": 0.0,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      17496,
+      35260,
+      17629,
+      23977,
+      52130,
+      51603,
+      28523,
+      18571,
+      28522,
+      45630
+    ],
+    "targets": []
+  },
+  "7": {
+    "query_id": "7",
+    "target_latency": 6.041243,
+    "embedding_latency": 0.0,
+    "target_cost": 0.0202,
+    "embedding_cost": 0.0,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      8351,
+      41850,
+      24944,
+      3351,
+      57859,
+      57716,
+      36719,
+      25967,
+      34365,
+      50676
+    ],
+    "targets": [
+      {
+        "filter": "row[\"price\"] <= 500",
+        "description": null
+      }
+    ]
+  },
+  "8": {
+    "query_id": "8",
+    "target_latency": 30.301463,
+    "embedding_latency": 6.993898,
+    "target_cost": 0.084255,
+    "embedding_cost": 0.0065922,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      5242,
+      42868,
+      52080,
+      37784,
+      40575,
+      46895,
+      44911,
+      27563,
+      44910,
+      46352
+    ],
+    "targets": [
+      {
+        "filter": "'shoe' in row[\"productDisplayName\"].lower() or 'sneaker' in row[\"productDisplayName\"].lower()",
+        "description": "shoe, sneaker, sports shoe, running shoe"
+      },
+      {
+        "filter": "'bag' in row[\"productDisplayName\"].lower() or 'backpack' in row[\"productDisplayName\"].lower() or 'sling' in row[\"productDisplayName\"].lower()",
+        "description": "bag, handbag, sling bag, backpack"
+      },
+      {
+        "filter": "'t-shirt' in row[\"productDisplayName\"].lower() or 'tee' in row[\"productDisplayName\"].lower() or 'top' in row[\"productDisplayName\"].lower()",
+        "description": "t-shirt, tee, top"
+      },
+      {
+        "filter": "'shirt' in row[\"productDisplayName\"].lower()",
+        "description": "shirt, button-down, collared shirt"
+      },
+      {
+        "filter": "'kurta' in row[\"productDisplayName\"].lower() or 'kurti' in row[\"productDisplayName\"].lower()",
+        "description": "kurta, kurti, tunic"
+      },
+      {
+        "filter": "'jeans' in row[\"productDisplayName\"].lower() or 'pants' in row[\"productDisplayName\"].lower() or 'trouser' in row[\"productDisplayName\"].lower()",
+        "description": "jeans, pants, trousers"
+      },
+      {
+        "filter": "'tracksuit' in row[\"productDisplayName\"].lower() or 'track jacket' in row[\"productDisplayName\"].lower() or 'track pant' in row[\"productDisplayName\"].lower()",
+        "description": "tracksuit, track jacket, track pants"
+      },
+      {
+        "filter": "'striped' in row[\"productDisplayName\"].lower() or 'stripe' in row[\"productDisplayName\"].lower() or 'checked' in row[\"productDisplayName\"].lower() or 'gingham' in row[\"productDisplayName\"].lower() or 'floral' in row[\"productDisplayName\"].lower() or 'graphic' in row[\"productDisplayName\"].lower()",
+        "description": "striped, checked, gingham, floral, graphic print"
+      }
+    ]
+  },
+  "12": {
+    "query_id": "12",
+    "target_latency": 11.958694,
+    "embedding_latency": 52.411016,
+    "target_cost": 0.03093,
+    "embedding_cost": 0.0122202,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      4696,
+      41845,
+      24149,
+      4766,
+      15222,
+      34830,
+      6119,
+      29104,
+      7631,
+      5815
+    ],
+    "targets": [
+      {
+        "filter": "\"adidas\" in row[\"productDisplayName\"].lower()",
+        "description": "watch, bag, backpack, cap"
+      },
+      {
+        "filter": "\"adidas\" in row[\"productDisplayName\"].lower()",
+        "description": "shirt, t-shirt, jacket, shorts"
+      },
+      {
+        "filter": "\"adidas\" in row[\"productDisplayName\"].lower()",
+        "description": "shoe, sneaker, sandal, flip-flop"
+      },
+      {
+        "filter": "\"puma\" in row[\"productDisplayName\"].lower()",
+        "description": "watch, bag, backpack, cap"
+      },
+      {
+        "filter": "\"puma\" in row[\"productDisplayName\"].lower()",
+        "description": "shirt, t-shirt, jacket, shorts"
+      },
+      {
+        "filter": "\"puma\" in row[\"productDisplayName\"].lower()",
+        "description": "shoe, sneaker, sandal, flip-flop"
+      }
+    ]
+  },
+  "13": {
+    "query_id": "13",
+    "target_latency": 13.284112,
+    "embedding_latency": 482.075107,
+    "target_cost": 0.031465,
+    "embedding_cost": 0.1164148,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      4800,
+      4805,
+      24149,
+      5432,
+      8916,
+      4811,
+      4817,
+      4459,
+      6543,
+      9968
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "men's. running, jogging, sports. t-shirt, tee, shirt. round neck, crew neck. short sleeves. blue. striped. outdoor running. breathable, lightweight"
+      },
+      {
+        "filter": null,
+        "description": "men's. running, jogging, sports. t-shirt, tee, shirt. round neck, crew neck. short sleeves. black. striped. outdoor running. breathable, lightweight"
+      }
+    ]
+  }
+}

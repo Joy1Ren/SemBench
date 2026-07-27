@@ -1,0 +1,357 @@
+{
+  "2": {
+    "query_id": "2",
+    "target_latency": 4.21679,
+    "embedding_latency": 701.33594,
+    "target_cost": 0.00558,
+    "embedding_cost": 30.3317176,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "sampled_ids": [
+      22598,
+      21873,
+      22615,
+      45404,
+      9012,
+      21863,
+      19505,
+      8103,
+      3640,
+      3252
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "yellow. silver. sports shoes, sneakers, trainers"
+      }
+    ]
+  },
+  "1": {
+    "query_id": "1",
+    "target_latency": 4.503165,
+    "embedding_latency": 138.176099,
+    "target_cost": 0.004775,
+    "embedding_cost": 0.02731,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "sampled_ids": [
+      5303,
+      5314,
+      1623,
+      5300,
+      5299,
+      5301,
+      1624,
+      41845,
+      52751,
+      38759
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "Reebok. backpack, rucksack"
+      }
+    ]
+  },
+  "3": {
+    "query_id": "3",
+    "target_latency": 5.810592,
+    "embedding_latency": 0.0,
+    "target_cost": 0.00579,
+    "embedding_cost": 0.0,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "sampled_ids": [
+      1891,
+      36563,
+      18925,
+      25447,
+      57553,
+      57087,
+      29531,
+      19429,
+      33481,
+      47632
+    ],
+    "targets": []
+  },
+  "4": {
+    "query_id": "4",
+    "target_latency": 5.920263,
+    "embedding_latency": 504.965487,
+    "target_cost": 0.00843,
+    "embedding_cost": 18.6290418,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "sampled_ids": [
+      3252,
+      3640,
+      45404,
+      8103,
+      21873,
+      19505,
+      9358,
+      19531,
+      1920,
+      8910
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "black"
+      },
+      {
+        "filter": null,
+        "description": "white"
+      },
+      {
+        "filter": null,
+        "description": "gray"
+      },
+      {
+        "filter": null,
+        "description": "brown"
+      },
+      {
+        "filter": null,
+        "description": "red"
+      },
+      {
+        "filter": null,
+        "description": "blue"
+      },
+      {
+        "filter": null,
+        "description": "green"
+      },
+      {
+        "filter": null,
+        "description": "yellow"
+      },
+      {
+        "filter": null,
+        "description": "pink"
+      },
+      {
+        "filter": null,
+        "description": "orange"
+      }
+    ]
+  },
+  "5": {
+    "query_id": "5",
+    "target_latency": 4.080457,
+    "embedding_latency": 67.153421,
+    "target_cost": 0.006995,
+    "embedding_cost": 0.01282,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "sampled_ids": [
+      46908,
+      47676,
+      27940,
+      4724,
+      4811,
+      14735,
+      11719,
+      28932,
+      56293,
+      59081
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "dress, gown, frock"
+      },
+      {
+        "filter": null,
+        "description": "bottomwear. pants, trousers, jeans, skirt, shorts, leggings"
+      },
+      {
+        "filter": null,
+        "description": "socks, hosiery"
+      },
+      {
+        "filter": null,
+        "description": "topwear. shirt, blouse, t-shirt, tee, jacket"
+      },
+      {
+        "filter": null,
+        "description": "innerwear. underwear, bra, briefs, panties, undershirt"
+      }
+    ]
+  },
+  "6": {
+    "query_id": "6",
+    "target_latency": 3.520099,
+    "embedding_latency": 702.859701,
+    "target_cost": 0.00641,
+    "embedding_cost": 30.3317248,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "sampled_ids": [
+      22615,
+      22598,
+      21873,
+      28538,
+      34035,
+      21863,
+      19505,
+      45404,
+      11920,
+      3312
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "dress, gown, frock"
+      },
+      {
+        "filter": null,
+        "description": "bottomwear, pants, trousers, jeans, skirt, shorts, leggings"
+      },
+      {
+        "filter": null,
+        "description": "socks, hosiery"
+      },
+      {
+        "filter": null,
+        "description": "topwear, shirt, blouse, t-shirt, jacket"
+      },
+      {
+        "filter": null,
+        "description": "innerwear, underwear, bra, undershirt, lingerie"
+      }
+    ]
+  },
+  "11": {
+    "query_id": "11",
+    "target_latency": 8.720264,
+    "embedding_latency": 840.243329,
+    "target_cost": 0.0122075,
+    "embedding_cost": 30.3590328,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "sampled_ids": [
+      3640,
+      3312,
+      19505,
+      14560,
+      28570,
+      4811,
+      41845,
+      54698,
+      9376,
+      3351
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "black. shoes, sneakers, boots, heels"
+      },
+      {
+        "filter": null,
+        "description": "black. pants, trousers, jeans, skirt"
+      },
+      {
+        "filter": null,
+        "description": "black. shirt, top, blouse, t-shirt"
+      },
+      {
+        "filter": "row[\"price\"] <= 500",
+        "description": "black. watch, jewellery, jewelry, bag, purse, handbag"
+      }
+    ]
+  },
+  "13": {
+    "query_id": "13",
+    "target_latency": 10.316522,
+    "embedding_latency": 839.411138,
+    "target_cost": 0.01116,
+    "embedding_cost": 30.3590314,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "sampled_ids": [
+      22615,
+      4800,
+      19651,
+      28932,
+      4859,
+      21873,
+      4817,
+      3786,
+      13705,
+      19531
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "men's. running shirt, athletic tee, sports t-shirt. round neck, crew neck. short sleeve. blue, black. striped. outdoor running. warm weather"
+      }
+    ]
+  },
+  "7": {
+    "query_id": "7",
+    "target_latency": 9.379626,
+    "embedding_latency": 0.0,
+    "target_cost": 0.0230375,
+    "embedding_cost": 0.0,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "sampled_ids": [
+      5670,
+      28047,
+      18217,
+      15754,
+      53126,
+      53554,
+      27517,
+      21873,
+      34342,
+      40015
+    ],
+    "targets": [
+      {
+        "filter": "row[\"price\"] <= 500",
+        "description": null
+      }
+    ]
+  },
+  "9": {
+    "query_id": "9",
+    "target_latency": 3.219171,
+    "embedding_latency": 0.0,
+    "target_cost": 0.0033925,
+    "embedding_cost": 0.0,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": false,
+    "no_image_emb": true,
+    "sampled_ids": [
+      15841,
+      1563,
+      15779,
+      9358,
+      47525,
+      31562,
+      26125,
+      53804,
+      21873,
+      29202
+    ],
+    "targets": [
+      {
+        "filter": "row[\"price\"] < 800",
+        "description": null
+      }
+    ]
+  }
+}

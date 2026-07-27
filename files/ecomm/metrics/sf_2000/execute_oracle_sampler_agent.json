@@ -1,0 +1,462 @@
+{
+  "1_1": {
+    "query_id": "1",
+    "scale_factor": 2000,
+    "agent_cost": 0.124085,
+    "agent_latency": 97.1671,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.001958,
+    "oracle_cost": 0.072533,
+    "metric_type": "f1_score",
+    "plans_written": 4,
+    "plans_executed": 4,
+    "unique_plans_executed": 4,
+    "run1": {
+      "latency": 57.8838,
+      "cost": 0.110092,
+      "quality": 1.0
+    },
+    "run2": {
+      "latency": 55.1079,
+      "cost": 0.110117,
+      "quality": 1.0
+    }
+  },
+  "1_2": {
+    "query_id": "1",
+    "scale_factor": 2000,
+    "agent_cost": 0.069,
+    "agent_latency": 68.4525,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.001481,
+    "oracle_cost": 0.079521,
+    "metric_type": "f1_score",
+    "plans_written": 3,
+    "plans_executed": 3,
+    "unique_plans_executed": 3,
+    "run1": {
+      "latency": 50.8389,
+      "cost": 0.11046,
+      "quality": 1.0
+    },
+    "run2": {
+      "latency": 51.2315,
+      "cost": 0.110444,
+      "quality": 1.0
+    }
+  },
+  "3_1": {
+    "query_id": "3",
+    "scale_factor": 2000,
+    "agent_cost": 0.060521,
+    "agent_latency": 61.2769,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.000829,
+    "oracle_cost": 0.054219,
+    "metric_type": "accuracy",
+    "plans_written": 2,
+    "plans_executed": 2,
+    "unique_plans_executed": 2,
+    "run1": {
+      "latency": 104.8455,
+      "cost": 0.056645,
+      "quality": 0.9487716831478243
+    },
+    "run2": {
+      "latency": 95.8886,
+      "cost": 0.05665,
+      "quality": 0.9469812679245112
+    }
+  },
+  "3_2": {
+    "query_id": "3",
+    "scale_factor": 2000,
+    "agent_cost": 0.058056,
+    "agent_latency": 75.9897,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.000827,
+    "oracle_cost": 0.05367,
+    "metric_type": "accuracy",
+    "plans_written": 2,
+    "plans_executed": 2,
+    "unique_plans_executed": 2,
+    "run1": {
+      "latency": 41.6453,
+      "cost": 0.108947,
+      "quality": 0.9445553662131224
+    },
+    "run2": {
+      "latency": 40.0916,
+      "cost": 0.108944,
+      "quality": 0.9433875621482332
+    }
+  },
+  "3_3": {
+    "query_id": "3",
+    "scale_factor": 2000,
+    "agent_cost": 0.067572,
+    "agent_latency": 72.0348,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.001233,
+    "oracle_cost": 0.069267,
+    "metric_type": "accuracy",
+    "plans_written": 3,
+    "plans_executed": 3,
+    "unique_plans_executed": 3,
+    "run1": {
+      "latency": 103.5608,
+      "cost": 0.057688,
+      "quality": 0.94690017494044
+    },
+    "run2": {
+      "latency": 95.0918,
+      "cost": 0.057704,
+      "quality": 0.9444572423852704
+    }
+  },
+  "4_1": {
+    "query_id": "4",
+    "scale_factor": 2000,
+    "agent_cost": 0.080287,
+    "agent_latency": 127.2661,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.046481,
+    "oracle_cost": 0.260983,
+    "metric_type": "accuracy",
+    "plans_written": 4,
+    "plans_executed": 4,
+    "unique_plans_executed": 4,
+    "run1": {
+      "latency": 101.7009,
+      "cost": 0.233155,
+      "quality": 0.6398653864542582
+    },
+    "run2": {
+      "latency": 94.5552,
+      "cost": 0.233183,
+      "quality": 0.6375110599681892
+    }
+  },
+  "4_2": {
+    "query_id": "4",
+    "scale_factor": 2000,
+    "agent_cost": 0.034251,
+    "agent_latency": 52.521,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.002525,
+    "oracle_cost": 0.07323,
+    "metric_type": "accuracy",
+    "plans_written": 1,
+    "plans_executed": 1,
+    "unique_plans_executed": 1,
+    "run1": {
+      "latency": 108.6729,
+      "cost": 0.311687,
+      "quality": 0.6271619605810437
+    },
+    "run2": {
+      "latency": 110.4877,
+      "cost": 0.311688,
+      "quality": 0.6268370256328654
+    }
+  },
+  "5_1": {
+    "query_id": "5",
+    "scale_factor": 2000,
+    "agent_cost": 0.069866,
+    "agent_latency": 53.082,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.000594,
+    "oracle_cost": 0.025718,
+    "metric_type": "accuracy",
+    "plans_written": 1,
+    "plans_executed": 1,
+    "unique_plans_executed": 1,
+    "run1": {
+      "latency": 21.3567,
+      "cost": 0.058451,
+      "quality": 0.9847181273431812
+    },
+    "run2": {
+      "latency": 21.0651,
+      "cost": 0.05845,
+      "quality": 0.9840628448565217
+    }
+  },
+  "5_2": {
+    "query_id": "5",
+    "scale_factor": 2000,
+    "agent_cost": 0.073752,
+    "agent_latency": 79.0141,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.001336,
+    "oracle_cost": 0.060165,
+    "metric_type": "accuracy",
+    "plans_written": 3,
+    "plans_executed": 3,
+    "unique_plans_executed": 3,
+    "run1": {
+      "latency": 21.716,
+      "cost": 0.040413,
+      "quality": 0.9602728797493061
+    },
+    "run2": {
+      "latency": 21.149,
+      "cost": 0.040413,
+      "quality": 0.9598974126177808
+    }
+  },
+  "6_1": {
+    "query_id": "6",
+    "scale_factor": 2000,
+    "agent_cost": 0.093875,
+    "agent_latency": 234.1218,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.008554,
+    "oracle_cost": 0.220755,
+    "metric_type": "accuracy",
+    "plans_written": 3,
+    "plans_executed": 3,
+    "unique_plans_executed": 3,
+    "run1": {
+      "latency": 89.3215,
+      "cost": 0.293108,
+      "quality": 0.7722164532840108
+    },
+    "run2": {
+      "latency": 102.9896,
+      "cost": 0.292074,
+      "quality": 0.7697971423438065
+    }
+  },
+  "6_2": {
+    "query_id": "6",
+    "scale_factor": 2000,
+    "agent_cost": 0.103322,
+    "agent_latency": 165.7153,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.011886,
+    "oracle_cost": 0.291909,
+    "metric_type": "accuracy",
+    "plans_written": 4,
+    "plans_executed": 4,
+    "unique_plans_executed": 4,
+    "run1": {
+      "latency": 116.0038,
+      "cost": 0.294621,
+      "quality": 0.8565476034464391
+    },
+    "run2": {
+      "latency": 88.6474,
+      "cost": 0.294625,
+      "quality": 0.8543069801073346
+    }
+  },
+  "7_1": {
+    "query_id": "7",
+    "scale_factor": 2000,
+    "agent_cost": 0.172647,
+    "agent_latency": 224.6347,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.00565,
+    "oracle_cost": 0.215512,
+    "metric_type": "f1_score",
+    "plans_written": 5,
+    "plans_executed": 5,
+    "unique_plans_executed": 5,
+    "run1": {
+      "latency": 57.0797,
+      "cost": 0.077139,
+      "quality": 0.6542239685658153
+    },
+    "run2": {
+      "latency": 57.7588,
+      "cost": 0.079316,
+      "quality": 0.6584058941728064
+    }
+  },
+  "7_2": {
+    "query_id": "7",
+    "scale_factor": 2000,
+    "agent_cost": 0.102208,
+    "agent_latency": 159.7266,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.001305,
+    "oracle_cost": 0.145556,
+    "metric_type": "f1_score",
+    "plans_written": 3,
+    "plans_executed": 3,
+    "unique_plans_executed": 3,
+    "run1": {
+      "latency": 46.6725,
+      "cost": 0.01291,
+      "quality": 0.7902408111533586
+    },
+    "run2": {
+      "latency": 41.8509,
+      "cost": 0.012922,
+      "quality": 0.838611449451888
+    }
+  },
+  "8_1": {
+    "query_id": "8",
+    "scale_factor": 2000,
+    "agent_cost": 0.31684,
+    "agent_latency": 342.4261,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.13713,
+    "oracle_cost": 0.757201,
+    "metric_type": "f1_score",
+    "plans_written": 4,
+    "plans_executed": 4,
+    "unique_plans_executed": 4,
+    "run1": {
+      "latency": 4.6169,
+      "cost": 0.009768,
+      "quality": 0.11764705882352941
+    },
+    "run2": {
+      "latency": 5.5418,
+      "cost": 0.009738,
+      "quality": 0.3157894736842105
+    }
+  },
+  "8_2": {
+    "query_id": "8",
+    "scale_factor": 2000,
+    "agent_cost": 0.490166,
+    "agent_latency": 706.9618,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.132753,
+    "oracle_cost": 2.396455,
+    "metric_type": "f1_score",
+    "plans_written": 8,
+    "plans_executed": 8,
+    "unique_plans_executed": 8,
+    "run1": {
+      "latency": 1.7175,
+      "cost": 0.008411,
+      "quality": 0.761904761904762
+    },
+    "run2": {
+      "latency": 1.8373,
+      "cost": 0.008701,
+      "quality": 0.761904761904762
+    }
+  },
+  "12_1": {
+    "query_id": "12",
+    "scale_factor": 2000,
+    "agent_cost": 0.147903,
+    "agent_latency": 161.2222,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.01038,
+    "oracle_cost": 0.328282,
+    "metric_type": "f1_score",
+    "plans_written": 4,
+    "plans_executed": 4,
+    "unique_plans_executed": 4,
+    "run1": {
+      "latency": 26.8116,
+      "cost": 0.064433,
+      "quality": 0.9782082324455207
+    },
+    "run2": {
+      "latency": 31.4202,
+      "cost": 0.062777,
+      "quality": 0.9782082324455207
+    }
+  },
+  "12_2": {
+    "query_id": "12",
+    "scale_factor": 2000,
+    "agent_cost": 0.134974,
+    "agent_latency": 139.4651,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.045344,
+    "oracle_cost": 0.248892,
+    "metric_type": "f1_score",
+    "plans_written": 3,
+    "plans_executed": 3,
+    "unique_plans_executed": 3,
+    "run1": {
+      "latency": 18.9513,
+      "cost": 0.044136,
+      "quality": 0.9055690072639225
+    },
+    "run2": {
+      "latency": 15.9108,
+      "cost": 0.044135,
+      "quality": 0.900726392251816
+    }
+  },
+  "13_1": {
+    "query_id": "13",
+    "scale_factor": 2000,
+    "agent_cost": 0.289383,
+    "agent_latency": 363.3491,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.034398,
+    "oracle_cost": 0.382005,
+    "metric_type": "f1_score",
+    "plans_written": 4,
+    "plans_executed": 4,
+    "unique_plans_executed": 4,
+    "run1": {
+      "latency": 27.1589,
+      "cost": 0.053971,
+      "quality": 0.23529411764705882
+    },
+    "run2": {
+      "latency": 26.796,
+      "cost": 0.054009,
+      "quality": 0.3157894736842105
+    }
+  },
+  "13_2": {
+    "query_id": "13",
+    "scale_factor": 2000,
+    "agent_cost": 0.371678,
+    "agent_latency": 327.5989,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.056481,
+    "oracle_cost": 0.408176,
+    "metric_type": "f1_score",
+    "plans_written": 5,
+    "plans_executed": 5,
+    "unique_plans_executed": 5,
+    "run1": {
+      "latency": 44.8526,
+      "cost": 0.070934,
+      "quality": 0.2222222222222222
+    },
+    "run2": {
+      "latency": 46.162,
+      "cost": 0.070771,
+      "quality": 0.3
+    }
+  },
+  "13_3": {
+    "query_id": "13",
+    "scale_factor": 2000,
+    "agent_cost": 0.178566,
+    "agent_latency": 227.8106,
+    "helper_cost": 0.0,
+    "subset_execution_cost": 0.035355,
+    "oracle_cost": 0.596136,
+    "metric_type": "f1_score",
+    "plans_written": 4,
+    "plans_executed": 4,
+    "unique_plans_executed": 4,
+    "run1": {
+      "latency": 74.7722,
+      "cost": 0.211164,
+      "quality": 0.4761904761904762
+    },
+    "run2": {
+      "latency": 74.2378,
+      "cost": 0.210569,
+      "quality": 0.4761904761904762
+    }
+  }
+}
