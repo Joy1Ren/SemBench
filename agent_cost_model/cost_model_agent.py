@@ -9,6 +9,7 @@ import textwrap
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+import time
 
 # ---------------------------------------------------------------------------
 # Guarded palimpzest import.
@@ -808,6 +809,83 @@ explore_sample("Reviews.csv", n=3)
         return f"{filename} sample ({n} rows):\n{df.to_string(index=False)}"
 
 
+class ExploreImagesTool(Tool):
+    name = "explore_images"
+    MAX_IMAGES = 5
+    # Fallback extensions tried after the configured one (covers datasets that mix formats).
+    _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+
+    # Rendered per-instance in __init__ so the prompt names this dataset's actual id column/folder.
+    _DOC_TEMPLATE = """\
+### explore_images(ids)
+Inspect up to {max_images} images (found in the data directory's `{subdir}/` folder, named by
+`{id_col}`) during data exploration. Pass a list of ids taken from the `{id_col}` column of a CSV.
+THIS step's observation returns an auto-generated TEXTUAL description of each image (a cheap vision
+model reads the pixels for you); the images themselves are not attached to your context. Use this a
+couple of times at most — images are expensive; do not stream the whole dataset through it.
+
+```python
+ids = explore_data("items.csv")["{id_col}"].head(3).tolist()
+explore_images(ids)
+```"""
+
+    def __init__(
+        self,
+        data_dir: str,
+        pending_images: list,
+        *,
+        id_col: str = "prod_id",
+        subdir: str = "images",
+        ext: str = ".jpg",
+    ) -> None:
+        import pathlib
+        self._images_dir = pathlib.Path(data_dir) / subdir
+        self._id_col = id_col
+        # Configured extension first, then the common fallbacks (deduped, order-preserving).
+        self._exts = tuple(dict.fromkeys((ext, *self._IMAGE_EXTS)))
+        self._pending = pending_images  # shared buffer drained by the run loop
+        self.doc = self._DOC_TEMPLATE.format(max_images=self.MAX_IMAGES, subdir=subdir, id_col=id_col)
+
+    def _find_image(self, image_id: Any):
+        for ext in self._exts:
+            p = self._images_dir / f"{image_id}{ext}"
+            if p.is_file():
+                return p
+        return None
+
+    def __call__(self, ids: Any) -> str:
+        import base64
+        import mimetypes
+
+        if not self._images_dir.is_dir():
+            return f"No {self._images_dir.name}/ directory found at {self._images_dir} — this dataset has no images."
+        if not isinstance(ids, (list, tuple)):
+            ids = [ids]
+        note = ""
+        if len(ids) > self.MAX_IMAGES:
+            note = f" (capped at {self.MAX_IMAGES}; ignored {len(ids) - self.MAX_IMAGES} extra id(s))"
+            ids = list(ids)[: self.MAX_IMAGES]
+
+        attached, missing = [], []
+        for image_id in ids:
+            path = self._find_image(image_id)
+            if path is None:
+                missing.append(str(image_id))
+                continue
+            data = path.read_bytes()
+            mime = mimetypes.guess_type(str(path))[0] or "image/jpeg"
+            b64 = base64.b64encode(data).decode("ascii")
+            self._pending.append({"id": str(image_id), "url": f"data:{mime};base64,{b64}"})
+            attached.append(str(image_id))
+
+        lines = [f"Attaching {len(attached)} image(s){note}; they appear below as vision inputs in your next step."]
+        if attached:
+            lines.append(f"  shown {self._id_col}s: {attached}")
+        if missing:
+            lines.append(f"  no image file found for {self._id_col}s: {missing}")
+        return "\n".join(lines)
+
+
 class GetOpSamplesTool(Tool):
     name = "get_op_samples"
     doc = """\
@@ -859,18 +937,25 @@ shown back to you in cost/estimate tables and helps you compare optimization ide
 
 After this call, `plans[name]["plan"]` holds the built pipeline and
 `plans[name]["description"]` holds your label.
-Use the load_data(filename) function to read CSVs from the data directory in your plan code.
+
+Use `load_data(filename)` to read the relavent CSV and seed the pipeline's source table.
+Use `add_image_data(pipeline: PhysicalPipeline, image_col: str)` to attach images: it adds a NEW
+column named `image_col` (type `pz.ImageFilepath`) holding each row's image-file path. `image_col`
+MUST be a fresh column name — do NOT reuse an existing column such as the id column. Reusing an
+existing name generates nothing (the map produces no new field), so every row errors and the plan
+returns 0 output. Then pass images to a model via `depends_on=["<image_col>"]` on the semantic op.
+
 
 ```python
 write_plan(\"\"\"
-pipeline = PhysicalPipeline(plan_name, "emails", load_data("Emails.csv"))
-pipeline.sem_filter("this email quotes someone outside of the the sender's company", model=pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE)
-pipeline.project(["emailId"])
-pipeline.limit(5)
-pipeline
+email = PhysicalPipeline(plan_name, "emails", load_data("Emails.csv"))
+email.sem_filter("this email quotes someone outside of the the sender's company", model=pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE)
+email.project(["emailId"])
+email.limit(5)
+email
 \"\"\", "p1", description="baseline: single cheap sem_filter on full text")
 # `plan_name` is automatically set to the name you pass (here "p1")
-# plans["p1"]["plan"] now holds the built pipeline
+# plans["p1"]["plan"] now holds the built `email`pipeline instance.
 ```"""
 
     def __init__(self, plan_codes: dict, plans: dict, executor: Any) -> None:
@@ -929,6 +1014,8 @@ execute_plan("p1")
         data_dir: str,
         agent_dir: str,
         quality_evaluator: Any,
+        scale_factor: int,
+        eval_metric: str | None = None,
     ) -> None:
         import pathlib
 
@@ -941,6 +1028,8 @@ execute_plan("p1")
         self._data_dir = pathlib.Path(data_dir)
         self._agent_dir = agent_dir
         self._quality_evaluator = quality_evaluator
+        self._scale_factor = scale_factor
+        self._eval_metric = eval_metric
 
     def __call__(self, plan_name: str) -> dict:
         import pandas as pd
@@ -953,11 +1042,14 @@ execute_plan("p1")
             )
         pipeline = entry["plan"]
 
-        subset_path = pathlib.Path(f"agent_cost_model/datasubset/{self._use_case}/Q{self._query_id}_subset.csv")
+        subset_path = pathlib.Path(f"agent_cost_model/datasubset/{self._use_case}/sf_{self._scale_factor}/Q{self._query_id}_subset.csv")
         plan_exec_error: Exception | None = None
-        per_op_list, plan_context = [], None
+        per_op_list, plan_context, plan_dict = [], None, {}
         try:
-            per_op_list, plan_context = pipeline.run_subset(subset_cache_path=str(subset_path))
+            # The plan is (re)executed on the subset every time — never cached — so that
+            # plan_dict["latency_s"] is a real WALL-CLOCK measurement of this run. (Only the
+            # oracle, which is used purely for quality scoring, is cached across plans.)
+            per_op_list, plan_context, plan_dict = pipeline.run_subset(subset_cache_path=str(subset_path))
         except Exception as e:
             plan_exec_error = e
             print(f"[execute_plan] plan execution failed for {plan_name}: {type(e).__name__}: {e}")
@@ -1001,7 +1093,12 @@ execute_plan("p1")
             ]
 
         total_cost = sum(e.get("cost_usd", 0) for e in per_op_list)
+        # latency_s: SUM of per-op per-record latencies (serial-equivalent). Kept as the plan's
+        # "actual latency" for the cost-model est-vs-act comparison, whose prediction (est.time)
+        # is also a per-op sum. wall_latency_s: real WALL-CLOCK time of this subset execution
+        # (from plan_dict), which reflects the join/convert parallelism.
         total_latency = sum(e.get("latency_s", 0) for e in per_op_list)
+        wall_latency_s = float(plan_dict.get("latency_s", 0.0) or 0.0)
         total_in_tok = sum(e.get("input_tokens", 0) for e in per_op_list)
         total_out_tok = sum(e.get("output_tokens", 0) for e in per_op_list)
 
@@ -1011,6 +1108,7 @@ execute_plan("p1")
             "plan_str": str(pipeline),
             "cost_usd": total_cost,
             "latency_s": total_latency,
+            "wall_latency_s": wall_latency_s,
             "input_tokens": total_in_tok,
             "output_tokens": total_out_tok,
             "quality": quality_result.quality if quality_result is not None else float("nan"),
@@ -1023,7 +1121,17 @@ execute_plan("p1")
         self._op_results.append(per_op_list)
 
         plan_summary = {k: v for k, v in plan_row.items() if k not in ("op_samples", "plan_str")}
-        return {"plan_summary": plan_summary, "op_summary": per_op_list}
+        # When quality is N/A because the oracle returned no rows, explain it in the observation so
+        # the agent doesn't read the bare NaN as a failed plan.
+        if quality_result is not None and getattr(quality_result, "quality_note", None):
+            plan_summary["quality_note"] = quality_result.quality_note
+        # Remind the agent, on every execution, what `quality` means and how it differs from
+        # per_sem_op_quality (context for why the two can diverge).
+        return {
+            "plan_summary": plan_summary,
+            "op_summary": per_op_list,
+            "quality_metric": _quality_metric_reminder(self._eval_metric),
+        }
 
 
 # ===========================================================================
@@ -1059,26 +1167,95 @@ def _parse_step(text: str) -> _Step:
 _PHYSICAL_SEMANTIC_OPERATORS = {
     "sem_filter": "pipeline.sem_filter(condition: str, model: pz.Mode) — LLM filter; keeps rows where condition is true.",
     "sem_map": "pipeline.sem_map(cols: list[dict], model: pz.Model) — Add LLM-derived columns. col is list of dict {'name': str, 'type': type, 'description': str}",
-    "sem_join": "pipeline.sem_join(other: PhysicalPipeline, condition: str, model: pz.Model) — LLM join; keeps pairs where condition holds. If specifying columns with `depends_on`, make sure to include both left and right columns (e.g., `depends_on=['col', 'col_right']`).",
+    "sem_join": "pipeline.sem_join(other: PhysicalPipeline, condition: str, model: pz.Model) — LLM join; keeps pairs where condition holds."
+                "If specifying columns with `depends_on`, make sure to include both left and right columns (e.g., `depends_on=['col', 'col_right']`)."
+                "Performs a self join when `other` is the same instance as `pipeline`",
 }
 
 _PHYSICAL_NONSEMANTIC_OPERATORS = {
     "filter": "pipeline.filter(fn: Callable[[dict], bool]) — Exact row filter using a Python callable.",
     "map": "pipeline.map(fn: Callable[[dict], dict], cols: list[dict]) - Exact row map using a Python callable to add new columns. col is list of dict {'name': str, 'type': type, 'description': str}",
+    "add_col_suffix": "pipeline.add_col_suffix(suffix: str) — Append `suffix` to EVERY column name."
+                      " Use before a join to disambiguate columns so the two sides have no colliding names, e.g."
+                      " left.add_col_suffix('_dish'); right.add_col_suffix('_table'); left.join(right, lambda l, r: l['brand_dish'] == r['brand_table']).",
+    "join": "pipeline.join(other: PhysicalPipeline, condition_fn: Callable[[dict, dict], bool]) — Exact (non-LLM) join;"
+            "keeps pairs where condition_fn(left, right) is True (e.g. lambda l, r: l['brand'] == r['brand'])."
+            "Right-side columns are suffixed with '_right' on a name collision. Prefer this over sem_join when the match is an exact/computable predicate."
+            "Performs a self join when `other` is the same instance as `pipeline`",
     "project": "pipeline.project(cols: list[str]) — Select a subset of columns.",
     "limit": "pipeline.limit(n: int) — Keep at most n rows.",
     "groupby": "pipeline.groupby(group_by_fields: list[str], agg_funcs: list[str], agg_fields: list[str]) — Group and aggregate. Produces schema name 'agg_func(agg_field)', e.g. 'count(reviewId)' or 'average(score)'.",
 }
 _AVAILABLE_MODELS_TEXT = (pathlib.Path(__file__).parent / "available_models.txt").read_text()
 
+# Human-readable explanation of the overall plan-quality metric, keyed by a query's `accuracy_metric`
+# (see files/<use_case>/queries/q<id>.toml and QualityEvaluator.evaluate). Rendered into the briefing
+# so the agent knows exactly how the 0–1 `quality` score it optimizes is computed.
+_QUALITY_METRIC_DOCS = {
+    "f1-score": (
+        "F1 of the returned id set vs. the oracle/ground-truth id set — the harmonic mean of "
+        "precision (fraction of returned ids that are correct) and recall (fraction of correct ids "
+        "returned). 1.0 = exactly the right set; both missing and extra ids lower it."
+    ),
+    "adjusted-rand-index": (
+        "Adjusted Rand Index between your per-record class assignment and the oracle's — a "
+        "clustering-agreement score corrected for chance. 1.0 = identical grouping, ~0 = chance-level, "
+        "and it can go negative. Used for classification/grouping queries."
+    ),
+    "spearman-rank": (
+        "Spearman rank correlation between your scoring and the oracle's -- a monotonic"
+        "agreement score. 1.0 = perfect positive correlation, ~0 = no correlation, -1.0 = perfect negative correlation"
+    ),
+    "relative-error": (
+        "A transformed metric from relative error between your value and the oracle's: 1/(1 + relative error)."
+        "1.0 = exact match. ~0 = very large difference"
+    )
+}
+
+
+def _quality_metric_reminder(eval_metric: str | None) -> str:
+    """One-line reminder of what `quality` measures, shown on every execute_plan result so the agent
+    keeps the metric in mind — and understands why overall quality can diverge from per_sem_op_quality."""
+    metric_desc = f"`{eval_metric}`" if eval_metric else "a plan-output-vs-oracle score"
+    return (
+        f"quality = {metric_desc} (0-1, higher is better). It scores the final plan output using the "
+        "evaluation metric; per_sem_op_quality scores the accuracy per semantic operator."
+    )
+
+
+def _quality_metric_section(eval_metric: str | None) -> str:
+    """Render the '## Plan Quality Metric' briefing section for this query's metric."""
+    if not eval_metric:
+        return (
+            "## Plan Quality Metric\n"
+            "Each executed plan's `quality` (0–1, higher is better) is scored against a strong-LLM "
+            "ORACLE running the same logical query. Treat the oracle score as ground truth and "
+            "optimize cost/latency at the best achievable quality."
+        )
+    doc = _QUALITY_METRIC_DOCS.get(
+        eval_metric, f"the `{eval_metric}` metric (0–1, higher is better)"
+    )
+    return (
+        "## Plan Quality Metric\n"
+        f"The `quality` score (0–1) reported for each executed plan is: {doc}\n"
+        "Your plan output is scored against a strong-LLM ORACLE running the same logical query; treat "
+        "that oracle score as ground truth and optimize cost/latency at the best achievable quality."
+    )
+
 _SYSTEM_TEMPLATE = """\
 {briefing}
+
+{quality_metric}
 
 ## HARD RULES
 
 ### No data snooping or hardcoded indexes/phrases
-`explore_sample` and `explore_schema` exist to help you understand **schema and format only**.
-You MUST NOT use sample rows to identify specific records and then hardcode their IDs, row
+`explore_sample` and `explore_schema` help you understand **schema and format**; `explore_data`
+lets you study the dataset in **aggregate** (row counts, keyword/keyphrase frequencies, value
+distributions) to inform how you design plans. What you learn there may only shape HOW you build a
+general plan — it must NEVER be baked into a plan as specific records, and you must not brute-force
+the data to solve the query and reverse-engineer a plan from the answer.
+You MUST NOT use the data to identify specific records and then hardcode their IDs, row
 indexes, or literal field values into a plan.  Every filter predicate in your plan must be a
 **general condition** that could correctly classify records it has never seen — for example
 `sem_filter("the text is clearly positive")` or `filter(lambda row: row["name"] == "John")`.
@@ -1088,7 +1265,7 @@ is **cheating** and will produce meaningless results. Rely on semantic operators
 complex keyword/regex/specific row selection.
 Furthermore, physical plans should only involve trees of the given semantic and non-semantic operators.
 Do not construct your own methods, rely on these operators only.
-If your plan contains any hardcoded record IDs or values you copied from `explore_sample`
+If your plan contains any hardcoded record IDs or values you copied from `explore_sample`/`explore_data`
 output, rewrite it before calling `execute_plan`.
 
 {estimate_rule}
@@ -1122,13 +1299,16 @@ quality requires a more expensive model.
 {available_models}
 
 ## Also available in your sandbox (no import needed)
-- `load_data(filename)` : read a CSV from the data directory and return a DataFrame.
-    df = load_data("items.csv")
-- `add_image_data(pipeline: PhysicalPipeline, col_name: str)` : returns a `PhysicalPipeline` with
-    an added `col_name` column of type `pz.ImageFilepath` to `pipeline` that contains the path to each row's image file.
-   Whenever a semantic operator depends on a column with type `pz.ImageFilepath`, it will
-   encode it as a base64 image to send to the LLM as a vision input.
-
+These run in the python blocks you execute each step (plan code, passed to write_plan, runs in a
+separate minimal sandbox — see the write_plan tool description).
+- `explore_data(filename)` : read a CSV from the data directory and return the FULL DataFrame for
+    DATA EXPLORATION. Use it to compute AGGREGATE statistics — row counts, how many rows contain a
+    keyword/keyphrase, `value_counts()` of a column — to gauge how common an item or attribute is.
+    This reveals the selectivity of filters, the size of tables feeding a join, and the class
+    balance of a classification/search task (rare target vs. common groups). Keep it lightweight
+    (a few probes, NOT exhaustive regex/brute-force scans) and use what you learn to GUIDE plan
+    design — never to solve the query or reverse-engineer a plan.
+    df = explore_data("items.csv")
 - `plans`           : dict[str, dict] — {{name: {{"plan": PhysicalPipeline, "description": str}}}}; populated by write_plan (updated by execute_plan)
 - `plan_codes`      : dict[str, str] — code strings stored by write_plan (keys = plan names)
 - `plan_results`    : the observed-execution store (`plan_results.rows`, `plan_results.df`)
@@ -1833,7 +2013,19 @@ class CostModelAgent:
 
         Suggested workflow:
         1. Explore the data: call `list_files()` to see available CSVs and folders,
-           `explore_schema(filename)` and `explore_sample(filename)` to understand each table.
+           `explore_schema(filename)` and `explore_sample(filename)` to understand each table's
+           columns and format. You ALSO have direct access to the full CSVs via `explore_data(filename)`,
+           which returns the whole table as a DataFrame. Use it to compute AGGREGATE statistics —
+           e.g. how many rows contain a keyword/keyphrase, or `value_counts()` on a column — to gauge
+           how common an item or attribute is (if "plastic" appears in 60% of rows but "marble" in
+           2%, plastic items are far more common). This informs the selectivity of your filters, the
+           size of the tables feeding a join, and the class distribution of a classification/search
+           task (a rare target vs. common groups) — let it GUIDE how you design plans. Keep
+           exploration lightweight: do NOT run excessive regex/brute-force scans, and never use the
+           data to solve the query and reverse-engineer a plan; the plan must remain a general solution.
+           If the dataset has an `images/` folder, you can SEE a few product images with
+           `explore_images(ids)` (up to 5, selected by the dataset's image id column) — useful to judge what a vision
+           operator would work with. Images are shown once and are costly, so inspect just a couple.
         2. Write a plan with `write_plan(code, name)`.
            - `code` builds a PhysicalPipeline instance and returns it as the last expression.
            - `name` is a string identifier you choose, e.g. "p1", "p2", "p3", ...
@@ -1881,7 +2073,19 @@ class CostModelAgent:
         Suggested workflow:
         To get initial data and performance traces:
         1. Explore the data: call `list_files()` to see available CSVs and folders,
-           `explore_schema(filename)` and `explore_sample(filename)` to understand each table.
+           `explore_schema(filename)` and `explore_sample(filename)` to understand each table's
+           columns and format. You ALSO have direct access to the full CSVs via `explore_data(filename)`,
+           which returns the whole table as a DataFrame. Use it to compute AGGREGATE statistics —
+           e.g. how many rows contain a keyword/keyphrase, or `value_counts()` on a column — to gauge
+           how common an item or attribute is (if "plastic" appears in 60% of rows but "marble" in
+           2%, plastic items are far more common). This informs the selectivity of your filters, the
+           size of the tables feeding a join, and the class distribution of a classification/search
+           task (a rare target vs. common groups) — let it GUIDE how you design plans. Keep
+           exploration lightweight: do NOT run excessive regex/brute-force scans, and never use the
+           data to solve the query and reverse-engineer a plan; the plan must remain a general solution.
+           If the dataset has an `images/` folder, you can SEE a few product images with
+           `explore_images(ids)` (up to 5, selected by the dataset's image id column) — useful to judge what a vision
+           operator would work with. Images are shown once and are costly, so inspect just a couple.
         2. Write a plan with `write_plan(code, name)`.
            - `code` builds a PhysicalPipeline instance and returns it as the last expression.
            - `name` is a string identifier you choose, e.g. "p1", "p2", "p3", ...
@@ -1930,7 +2134,19 @@ class CostModelAgent:
 
         === Bootstrap ===
         1. Explore the data: call `list_files()` to see available CSVs and folders,
-           `explore_schema(filename)` and `explore_sample(filename)` to understand each table.
+           `explore_schema(filename)` and `explore_sample(filename)` to understand each table's
+           columns and format. You ALSO have direct access to the full CSVs via `explore_data(filename)`,
+           which returns the whole table as a DataFrame. Use it to compute AGGREGATE statistics —
+           e.g. how many rows contain a keyword/keyphrase, or `value_counts()` on a column — to gauge
+           how common an item or attribute is (if "plastic" appears in 60% of rows but "marble" in
+           2%, plastic items are far more common). This informs the selectivity of your filters, the
+           size of the tables feeding a join, and the class distribution of a classification/search
+           task (a rare target vs. common groups) — let it GUIDE how you design plans. Keep
+           exploration lightweight: do NOT run excessive regex/brute-force scans, and never use the
+           data to solve the query and reverse-engineer a plan; the plan must remain a general solution.
+           If the dataset has an `images/` folder, you can SEE a few product images with
+           `explore_images(ids)` (up to 5, selected by the dataset's image id column) — useful to judge what a vision
+           operator would work with. Images are shown once and are costly, so inspect just a couple.
         2. Write 1–2 baseline plans with `write_plan(code, name, description)` that capture
            meaningfully different design approaches (e.g., one with a strong early filter, one
            without; one using a capable model, one using a cheaper model). Give each a short
@@ -2004,7 +2220,7 @@ class CostModelAgent:
         data_dir: str = "dataset/use_case",
         agent_dir: str = "no_name",
         use_case: str = "use_case",
-        max_steps: int = 12,
+        max_steps: int = 40,
         max_recover_retries: int = 1,
         context_budget_chars: int = 200_000,
         authorized_imports: list[str] | None = None,
@@ -2030,14 +2246,16 @@ class CostModelAgent:
         self.context_budget_chars = context_budget_chars
         self.authorized_imports = authorized_imports or [
             "math", "statistics", "json", "collections", "itertools",
-            "palimpzest"
+            "palimpzest", "pandas"
         ]
         self.verbose = verbose
         # Rebuilt per run(); kept on the instance so callers can read it after.
         self.messages: list[dict] = []
         self.reasoning_steps: list[str | None] = []
         self.trajectory_steps: list[dict] = []
+        self._pending_images: list[dict] = []  # base64 images staged by explore_images
         self.agent_cost_usd: float = 0.0
+        self.opt_latency: float = 0.0
         self.execution_cost_usd: float = 0.0
         self.oracle_cost_usd: float = 0.0
         self.helper_cost_usd: float = 0.0
@@ -2053,8 +2271,7 @@ class CostModelAgent:
             return
         import pandas as pd
         import pathlib
-        data_path = pathlib.Path(query_info["data_dir"])
-        metrics_dir = data_path.parents[1] / "trajectory" / self.use_case
+        metrics_dir = pathlib.Path(__file__).parent / "trajectory" / self.use_case / f"sf_{query_info['scale_factor']}"
         metrics_dir.mkdir(parents=True, exist_ok=True)
         rc = query_info.get("runcount")
         qkey = f"Q{query_info['query_id']}_{rc}" if rc is not None else f"Q{query_info['query_id']}"
@@ -2101,8 +2318,7 @@ class CostModelAgent:
         if not results.rows:
             return
         import pathlib
-        data_path = pathlib.Path(query_info["data_dir"])
-        metrics_dir = data_path.parents[1] / "metrics" / self.use_case
+        metrics_dir = pathlib.Path(__file__).parent / "metrics" / self.use_case / f"sf_{query_info['scale_factor']}"
         metrics_dir.mkdir(parents=True, exist_ok=True)
         rc = query_info.get("runcount")
         qkey = f"Q{query_info['query_id']}_{rc}" if rc is not None else f"Q{query_info['query_id']}"
@@ -2127,6 +2343,7 @@ class CostModelAgent:
         briefing: str | None = None,
         final_answer_doc: str | None = None,
         mode: str = "",
+        eval_metric: str | None = None,
     ) -> str:
         if "customCost" in mode:
             estimate_rule = (
@@ -2147,6 +2364,7 @@ class CostModelAgent:
             estimate_rule = ""
         return _SYSTEM_TEMPLATE.format(
             briefing=briefing if briefing is not None else self.briefing,
+            quality_metric=_quality_metric_section(eval_metric),
             tools_doc="\n\n".join(t.doc for t in tools),
             physical_sem_ops="\n".join(f"- {d}" for d in _PHYSICAL_SEMANTIC_OPERATORS.values()),
             physical_nonsem_ops="\n".join(f"- {d}" for d in _PHYSICAL_NONSEMANTIC_OPERATORS.values()),
@@ -2232,6 +2450,12 @@ class CostModelAgent:
         registry = CostModelRegistry()
         plan_codes: dict = {}  # populated by WritePlanTool; shared with ExecutePlanTool
         data_dir = query_info["data_dir"]
+        # Image-file naming convention (configurable per dataset via query_info). Images live at
+        # <data_dir>/<image_subdir>/<row[image_id_col]><image_ext>; used to build the on-disk path
+        # in both add_image_data (plan code) and the explore_images tool (data exploration).
+        image_id_col = query_info.get("image_id_col", "prod_id")
+        image_subdir = query_info.get("image_subdir", "images")
+        image_ext = query_info.get("image_ext", ".jpg")
 
         # Build oracle client and quality evaluator (oracle runs inside QualityEvaluator)
         oracle_client = OpenRouterClient(self.oracle_model, reasoning_effort=self.oracle_reasoning_effort)
@@ -2246,6 +2470,7 @@ class CostModelAgent:
             pathlib.Path(__file__).parent
             / "datasubset"
             / query_info["use_case"]
+            / f"sf_{query_info['scale_factor']}"
             / f"Q{query_info['query_id']}_oracle_result.csv"
         )
         _oracle_result_path.unlink(missing_ok=True)
@@ -2280,17 +2505,32 @@ class CostModelAgent:
             return pd.read_csv(os.path.join(data_dir, filename))
 
         def add_image_data(pipeline: PhysicalPipeline, col_name: str = "image_file_path"):
+            # `col_name` is the NEW image column being added; the on-disk path is built from the
+            # configured naming convention (<image_subdir>/<row[image_id_col]><image_ext>).
+            # `col_name` MUST NOT collide with an existing column (e.g. the id column). PZ's convert
+            # only generates fields not already present on the record, so a colliding name produces
+            # an empty field_answers and raises `max() iterable argument is empty` on every row.
             pipeline.map(
-                udf=lambda row: {col_name: os.path.join(data_dir, "images", str(row["prod_id"]) + ".jpg")},
+                udf=lambda row: {col_name: os.path.join(data_dir, image_subdir, str(int(float(row[image_id_col]))) + image_ext)},
                 cols=[{"name": col_name, "type": pz.ImageFilepath, "description": ""}],
             )
             return pipeline
 
+        def explore_data(filename: str) -> pd.DataFrame:
+            # Direct full-CSV read for the MAIN loop's data exploration ONLY. Returns the whole
+            # table (unlike the row-capped explore_sample tool) so the agent can compute aggregate
+            # statistics — keyword/keyphrase frequencies, value distributions, class balance — to
+            # judge filter selectivity, join input sizes, and how rare a search target is. It is
+            # deliberately NOT exposed to plan code (see plan_variables / plan_executor below), so
+            # query plans can never depend on directly scanning the dataset.
+            return pd.read_csv(os.path.join(data_dir, filename))
+
+        # Main-loop sandbox variables: inspection stores + operator/cost introspection + direct
+        # CSV access for data exploration (explore_data). Intentionally EXCLUDES the plan-building
+        # helpers (load_data/add_image_data/PhysicalPipeline/pz) — those live only in the minimal
+        # plan-construction sandbox below.
         variables = {
-            "load_data": load_data,
-            "add_image_data": add_image_data,
-            "PhysicalPipeline": PhysicalPipeline,
-            "pz": pz,
+            "explore_data": explore_data,
             "plans": plans,
             "plan_codes": plan_codes,
             "plan_results": plan_results,
@@ -2303,10 +2543,33 @@ class CostModelAgent:
             "observed_op_stats": make_observed_op_stats(op_results),
         }
 
+        # Minimal sandbox variables for WritePlanTool: only what plan CODE needs to construct a
+        # PhysicalPipeline — the source-table reader (required by PhysicalPipeline.__init__ for
+        # schema inference), the image helper, the pipeline class, and palimpzest (pz.Model /
+        # pz.ImageFilepath). No results stores, no cost-model introspection, no explore_data.
+        plan_variables = {
+            "load_data": load_data,
+            "add_image_data": add_image_data,
+            "PhysicalPipeline": PhysicalPipeline,
+            "pz": pz,
+        }
+
+        # Buffer of base64 image parts staged by explore_images; drained by the run loop, which
+        # describes them (via a cheap vision model) into this step's textual observation. Images are
+        # NOT forwarded to the main agent as pixels — explore_images is a one-step describe-only tool.
+        self._pending_images: list[dict] = []
+        # Dedicated cheap vision model for image descriptions, kept separate from the (possibly
+        # pricey) main-agent model so exploring images stays cheap.
+        self._image_describer = OpenRouterClient("google/gemini-2.5-flash-lite")
+
         base_tools = [
             ListFilesTool(data_dir),
             ExploreSchemaT(data_dir),
             ExploreSampleTool(data_dir),
+            ExploreImagesTool(
+                data_dir, self._pending_images,
+                id_col=image_id_col, subdir=image_subdir, ext=image_ext,
+            ),
             GetOpSamplesTool(plan_results),
             ExecutePlanTool(
                 plan_codes=plan_codes,
@@ -2318,6 +2581,8 @@ class CostModelAgent:
                 data_dir=data_dir,
                 agent_dir=self.agent_dir,
                 quality_evaluator=quality_evaluator,
+                scale_factor=query_info["scale_factor"],
+                eval_metric=query_info.get("eval_metric"),
             ),
         ]
 
@@ -2363,19 +2628,37 @@ class CostModelAgent:
             briefing = self.sampleCost_briefing
             final_answer_doc = self.sampleCost_final_answer_doc
 
-        # Create executor first so WritePlanTool can share the same sandbox state.
+        # Main-loop sandbox: the agent's step-by-step python blocks run here.
         executor = LocalPythonExecutor(additional_authorized_imports=self.authorized_imports)
         executor.send_variables(variables)
-        write_plan_tool = WritePlanTool(plan_codes, plans=plans, executor=executor)
+
+        # Separate, minimal sandbox for plan CONSTRUCTION. WritePlanTool executes plan code here,
+        # so plan code sees only the pipeline-building helpers — never the results stores or
+        # explore_data. This keeps query plans from depending on direct dataset access.
+        plan_executor = LocalPythonExecutor(additional_authorized_imports=self.authorized_imports)
+        plan_executor.send_variables(plan_variables)
+        # Install the base Python builtins (float/int/str/len/... from BASE_PYTHON_TOOLS) so plan
+        # UDFs can type-cast, e.g. `map(lambda row: {"p": float(row["price"])}, ...)`. Passing {}
+        # means NO agent tools leak into plan code — send_tools sets static_tools to
+        # {} | BASE_PYTHON_TOOLS | additional_functions.
+        plan_executor.send_tools({})
+        write_plan_tool = WritePlanTool(plan_codes, plans=plans, executor=plan_executor)
+        # Kept so _run_final_evaluation can re-instantiate a fresh pipeline from a plan's source code
+        # (rebuilding for each repeated final run keeps runs independent).
+        self._plan_executor = plan_executor
+
         tools = base_tools + [write_plan_tool]
         executor.send_tools({t.name: t for t in tools})
 
-        system = self._system_prompt(tools, briefing, final_answer_doc, mode=mode)
+        system = self._system_prompt(
+            tools, briefing, final_answer_doc, mode=mode, eval_metric=query_info.get("eval_metric")
+        )
         opening = self._opening_message(task, plans, op_results)
         self.messages = [{"role": "user", "content": opening}]
         self.reasoning_steps = []
         self.trajectory_steps = []
         self.agent_cost_usd = 0.0
+        self.opt_latency = 0.0
         self.execution_cost_usd = 0.0
         self.oracle_cost_usd = 0.0
         self.helper_cost_usd = 0.0
@@ -2412,12 +2695,19 @@ class CostModelAgent:
             "use_case": "use_case",
             "scale_factor": 0,
             "query_id": 0,
+            "eval_metric": None,  # e.g. "f1-score" / "adjusted-rand-index"; explains the quality metric in the briefing
+            "final_eval_runs": 1,  # times to re-run the chosen plan on the full dataset (fresh pipeline each)
             "data_dir": "agent_cost_model/dataset/use_case",
-            "gt_dir": "files/use_case/raw_results/ground_truth"
+            "gt_dir": "files/use_case/raw_results/ground_truth/sf_0",
+            "image_id_col": "prod_id",
+            "image_subdir": "images",
+            "image_ext": ".jpg",
         },
     ) -> Any:
         """Bounded tool loop over `plans`/`plan_results`/`op_results`, returning the JSON final
         answer. `_setup_run` does all the wiring; this method is just the step loop."""
+        optimization_start = time.time()
+
         ctx = self._setup_run(task, plans, plan_results, op_results, mode, query_info)
         executor, system, registry = ctx.executor, ctx.system, ctx.registry
         cost_helper, quality_evaluator, plan_codes = ctx.cost_helper, ctx.quality_evaluator, ctx.plan_codes
@@ -2452,6 +2742,7 @@ class CostModelAgent:
                 continue
 
             if parsed.code is None:  # final answer
+                self.opt_latency = time.time()-optimization_start
                 self._log(f"[final answer] {parsed.result}")
                 self.trajectory_steps[-1]["observation"] = f"[final answer] {parsed.result}"
                 if isinstance(parsed.result, dict):
@@ -2477,6 +2768,14 @@ class CostModelAgent:
                 continue
 
             obs = self._format_observation(step, out)
+            if self._pending_images:
+                # explore_images staged images this step. Describe them with the cheap vision model
+                # and fold the description into THIS step's textual observation. The pixels are NOT
+                # forwarded to the main agent — this is a one-step, describe-only exploration.
+                shown_ids = [img["id"] for img in self._pending_images]
+                description = self._describe_images(self._pending_images)
+                self._pending_images.clear()
+                obs = f"{obs}\n\nImage descriptions (auto-generated) for ids {shown_ids}:\n{description}"
             self.messages.append({"role": "user", "content": obs})
             self.trajectory_steps[-1]["observation"] = obs
             self._log(obs)
@@ -2503,12 +2802,13 @@ class CostModelAgent:
             helper_consumed = self._merge_helper_trajectory(cost_helper, step, helper_consumed)
 
         # out of steps — one forced terminal turn
+        result = self._terminal_turn(system)
+        self.opt_latency = time.time() - optimization_start
         self._save_results_df(plan_results, query_info)
         helper_consumed = self._merge_helper_trajectory(cost_helper, step, helper_consumed)
         self._save_trajectory_df(query_info)
         if cost_helper is not None:
             self._save_cost_model_codes(cost_helper.model_versions, query_info)
-        result = self._terminal_turn(system)
         if isinstance(result, dict):
             result["plan_codes"] = plan_codes
         self._account_costs(plan_results, quality_evaluator, cost_helper)
@@ -2516,6 +2816,39 @@ class CostModelAgent:
         return result
 
     # -- helpers -----------------------------------------------------------
+    _IMAGE_DESCRIBE_SYSTEM = (
+        "You are a vision assistant helping a query-planning agent explore a dataset's images. "
+        "For each attached image, write ONE concise, factual line describing what it shows — main "
+        "object/subject, dominant colors, and any attributes useful for filtering (product type, "
+        "style, visible text). Prefix each line with the image's id. No preamble, no summary."
+    )
+
+    def _describe_images(self, images: list[dict]) -> str:
+        """Generate a textual description of the staged explore_images pictures.
+
+        Uses a dedicated cheap vision model (`_image_describer`, gemini-2.5-flash-lite) so image
+        exploration stays inexpensive regardless of the main-agent model. The description is shown in
+        THIS step's observation and persisted in the trajectory; the pixels themselves are not
+        forwarded to the main agent. Cost is billed to agent_cost_usd, matching normal LLM steps."""
+        content: list[dict] = [{
+            "type": "text",
+            "text": f"Describe each of these {len(images)} image(s), one short line each, prefixed with its id:",
+        }]
+        for img in images:
+            content.append({"type": "text", "text": f"id {img['id']}:"})
+            content.append({"type": "image_url", "image_url": {"url": img["url"]}})
+        try:
+            result = self._image_describer.generate(self._IMAGE_DESCRIBE_SYSTEM, [{"role": "user", "content": content}])
+        except Exception as e:
+            return f"[image description unavailable: {type(e).__name__}: {e}]"
+        text, meta = result, {}
+        if isinstance(result, tuple):
+            text = result[0] if result else ""
+            if len(result) >= 3 and isinstance(result[2], dict):
+                meta = result[2]
+        self.agent_cost_usd += float(meta.get("cost_usd", 0.0) or 0.0)
+        return (str(text) or "").strip() or "[no description returned]"
+
     def _llm_step(self, system: str, extra: list[dict] | None = None) -> str:
         msgs = self._trim(self.messages)
         if extra:
@@ -2577,6 +2910,22 @@ class CostModelAgent:
             )
         return obs
 
+    def _fresh_pipeline(self, plan_name: str, plan_codes: dict | None):
+        """Re-instantiate a FRESH PhysicalPipeline from a plan's source code via the plan-construction
+        executor, so each repeated final run is fully independent (no join accumulation or other
+        operator state carried across runs). Returns None if the code or executor is unavailable."""
+        code = (plan_codes or {}).get(plan_name)
+        executor = getattr(self, "_plan_executor", None)
+        if code is None or executor is None:
+            return None
+        try:
+            executor.send_variables({"plan_name": plan_name})
+            result = executor(code)
+        except Exception as e:
+            self._log(f"[final_eval] could not rebuild {plan_name!r} from code: {type(e).__name__}: {e}")
+            return None
+        return getattr(result, "output", None)
+
     def _run_final_evaluation(
         self,
         final_answer: Any,
@@ -2585,7 +2934,12 @@ class CostModelAgent:
         plan_codes: dict | None = None,
         plan_results: "ResultsStore | None" = None,
     ) -> None:
-        """Run the agent-selected plan on the full dataset vs. real ground truth; append to metrics JSON."""
+        """Run the agent-selected plan on the full dataset vs. real ground truth; append to metrics JSON.
+
+        The chosen plan is re-run `final_eval_runs` times (each a fresh pipeline) to average out LLM
+        stochasticity. The metrics entry keeps the agent-search-level fields once, with per-run
+        full-dataset execution metrics nested under run1/run2/…; raw output of run k is saved as
+        Q{query_id}_{runcount}_{k}.csv."""
         if not isinstance(final_answer, dict):
             return
         best_name = final_answer.get("best_plan", {}).get("name")
@@ -2593,13 +2947,12 @@ class CostModelAgent:
             self._log(f"[final_eval] plan {best_name!r} not in plans — skipping final evaluation")
             return
 
-        pipeline = plans[best_name]["plan"]
         query_id = query_info["query_id"]
         use_case = query_info["use_case"]
         scale_factor = query_info["scale_factor"]
         runcount = query_info.get("runcount")
         run_suffix = f"Q{query_id}_{runcount}" if runcount is not None else f"Q{query_id}"
-        gt_dir = query_info.get("gt_dir", f"files/{use_case}/raw_results/ground_truth")
+        gt_dir = query_info.get("gt_dir", f"files/{use_case}/raw_results/ground_truth/sf_{scale_factor}")
 
         import dataclasses
         import pathlib
@@ -2611,48 +2964,82 @@ class CostModelAgent:
             self._log(f"[final_eval] ground truth not found at {gt_path} — skipping")
             return
 
-        self._log(f"[final_eval] running {best_name!r} on full dataset...")
-        try:
-            result_collection, op_results_full, _ = pipeline.run()
-        except Exception as e:
-            self._log(f"[final_eval] pipeline.run() failed: {type(e).__name__}: {e}")
-            return
-
-        results_df = result_collection.to_df()
-        raw_results_dir = pathlib.Path(f"files/{use_case}/raw_results/palimpzest/{self.agent_dir}")
+        raw_results_dir = pathlib.Path(f"files/{use_case}/raw_results/palimpzest/{self.agent_dir}/sf_{scale_factor}")
         raw_results_dir.mkdir(parents=True, exist_ok=True)
-        results_df.to_csv(raw_results_dir / f"{run_suffix}.csv", index=False)
-        self._log(f"[final_eval] raw results → {raw_results_dir / f'{run_suffix}.csv'}")
-        results_df = _normalize_plan_df(results_df, use_case, query_id)
 
-        total_latency = sum(r.get("latency_s", 0) for r in op_results_full)
-        total_cost = sum(r.get("cost_usd", 0) for r in op_results_full)
-
-        quality = float("nan")
-        metric_type = "unknown"
+        # Load evaluator + ground truth once; reused across every repeated final run.
         try:
             from agent_cost_model.quality_evaluator import _load_evaluator
             evaluator = _load_evaluator(use_case, scale_factor, self.agent_dir)
             gt_df = pd.read_csv(gt_path)
-            qm = evaluator._evaluate_single_query(query_id, results_df, gt_df)
-            qm_dict = dataclasses.asdict(qm)
-            qm_type = type(qm).__name__
-            if "Retrieval" in qm_type:
-                metric_type = "f1_score"
-                quality = float(qm_dict.get("f1_score", float("nan")))
-            elif "Aggregation" in qm_type:
-                metric_type = "relative_error"
-                quality = 1.0 - float(qm_dict.get("relative_error", 1.0))
-            elif "Rank" in qm_type:
-                metric_type = "spearman_correlation"
-                quality = float(qm_dict.get("spearman_correlation", float("nan")))
-            elif "SingleAccuracy" in qm_type:
-                metric_type = "accuracy"
-                quality = float(qm_dict.get("accuracy", float("nan")))
         except Exception as e:
-            self._log(f"[final_eval] evaluation failed: {type(e).__name__}: {e}")
+            self._log(f"[final_eval] evaluator/ground-truth load failed: {type(e).__name__}: {e}")
+            evaluator, gt_df = None, None
 
-        metrics_path = pathlib.Path(f"files/{use_case}/metrics/{self.agent_dir}.json")
+        n_runs = max(1, int(query_info.get("final_eval_runs", 1) or 1))
+        metric_type = "unknown"
+        runs: dict[str, dict] = {}
+        for final_run in range(1, n_runs + 1):
+            # Rebuild a fresh pipeline from the plan code so this run is independent of prior runs.
+            pipeline = self._fresh_pipeline(best_name, plan_codes)
+            if pipeline is None:
+                # Could not rebuild (missing code/executor): fall back to the stored pipeline. Fine
+                # for a single run; repeated runs of a join plan could carry over accumulated state.
+                pipeline = plans[best_name]["plan"]
+            self._log(f"[final_eval] running {best_name!r} on full dataset (run {final_run}/{n_runs})...")
+            try:
+                result_collection, op_results_full, plan_dict = pipeline.run()
+            except Exception as e:
+                self._log(f"[final_eval] pipeline.run() failed (run {final_run}): {type(e).__name__}: {e}")
+                continue
+
+            results_df = result_collection.to_df()
+            # Replace NaN in string columns so evaluators (e.g. adjusted-rand-index) don't crash.
+            str_cols = results_df.select_dtypes(include="object").columns
+            results_df[str_cols] = results_df[str_cols].fillna("")
+            raw_name = f"{run_suffix}_{final_run}"
+            results_df.to_csv(raw_results_dir / f"{raw_name}.csv", index=False)
+            self._log(f"[final_eval] raw results (run {final_run}) → {raw_results_dir / f'{raw_name}.csv'}")
+            eval_df = _normalize_plan_df(results_df, use_case, query_id)
+
+            # Wall-clock latency of the full run. plan_dict["latency_s"] is time.time()-based
+            # (see PhysicalPipeline.run), so it reflects real elapsed time with the join/convert
+            # parallelism. Do NOT fall back to sum(op_results_full["latency_s"]): each op's latency_s
+            # is a SUM of per-record times, which ignores the ~20-way parallelism and overcounts
+            # wall-clock by roughly the parallelism factor (this is what made Q7 look like ~8179s vs
+            # PZ's ~300s). If the wall-clock time is somehow absent, record NaN rather than that
+            # misleading overcount.
+            total_latency = plan_dict.get("latency_s", float("nan"))
+            total_cost = sum(r.get("cost_usd", 0) for r in op_results_full)
+
+            quality = float("nan")
+            if evaluator is not None and gt_df is not None:
+                try:
+                    qm = evaluator._evaluate_single_query(query_id, eval_df, gt_df)
+                    qm_dict = dataclasses.asdict(qm)
+                    qm_type = type(qm).__name__
+                    if "Retrieval" in qm_type:
+                        metric_type = "f1_score"
+                        quality = float(qm_dict.get("f1_score", float("nan")))
+                    elif "Aggregation" in qm_type:
+                        metric_type = "relative_error"
+                        quality = 1.0 / (1.0 + float(qm_dict.get("relative_error", 1.0)))
+                    elif "Rank" in qm_type:
+                        metric_type = "spearman_correlation"
+                        quality = float(qm_dict.get("spearman_correlation", float("nan")))
+                    elif "SingleAccuracy" in qm_type:
+                        metric_type = "accuracy"
+                        quality = float(qm_dict.get("accuracy", float("nan")))
+                except Exception as e:
+                    self._log(f"[final_eval] evaluation failed (run {final_run}): {type(e).__name__}: {e}")
+
+            runs[f"run{final_run}"] = {
+                "latency": round(total_latency, 4),
+                "cost": round(total_cost, 6),
+                "quality": quality,
+            }
+
+        metrics_path = pathlib.Path(f"files/{use_case}/metrics/sf_{scale_factor}/{self.agent_dir}.json")
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
         entry: dict = {}
         if metrics_path.exists():
@@ -2665,22 +3052,40 @@ class CostModelAgent:
         plans_executed = len(_executed_rows)
         unique_plans_executed = len(set(_executed_rows))
         metrics_key = f"{query_id}_{runcount}" if runcount is not None else str(query_id)
+        # Agent-search-level fields once, then per-run full-dataset execution metrics nested under runK.
         entry[metrics_key] = {
             "query_id": str(query_id),
-            "latency": round(total_latency, 4),
-            "cost": round(total_cost, 6),
+            "scale_factor": scale_factor,
             "agent_cost": round(self.agent_cost_usd, 6),
+            "agent_latency": round(self.opt_latency, 4),
             "helper_cost": round(self.helper_cost_usd, 6),
             "subset_execution_cost": round(self.execution_cost_usd, 6),
             "oracle_cost": round(self.oracle_cost_usd, 6),
             "metric_type": metric_type,
-            "quality": quality,
             "plans_written": plans_written,
             "plans_executed": plans_executed,
             "unique_plans_executed": unique_plans_executed,
+            **runs,
         }
+
+        # Sort entries by increasing query_id, then by runcount. Keys are "{query_id}_{runcount}"
+        # (or just "{query_id}" when runcount is None → treated as runcount -1 so it sorts first);
+        # any non-numeric legacy keys sort last.
+        def _entry_sort_key(k: str) -> tuple[float, int]:
+            qid_str, _, rc_str = k.partition("_")
+            try:
+                qid = float(int(qid_str))
+            except ValueError:
+                return (float("inf"), -1)
+            try:
+                rc = int(rc_str) if rc_str else -1
+            except ValueError:
+                rc = -1
+            return (qid, rc)
+
+        entry = {k: entry[k] for k in sorted(entry, key=_entry_sort_key)}
         metrics_path.write_text(json.dumps(entry, indent=2))
-        self._log(f"[final_eval] metrics → {metrics_path}")
+        self._log(f"[final_eval] metrics ({len(runs)}/{n_runs} run(s) succeeded) → {metrics_path}")
 
     _TERMINAL_PROMPT = (
         "You are out of steps. Do NOT call any tool — emit exactly ONE ```json``` block: "

@@ -1079,6 +1079,14 @@ def evaluate_try(
     try:
         for stmt in try_node.body:
             evaluate_ast(stmt, state, static_tools, custom_tools, authorized_imports)
+    except (BreakException, ContinueException, ReturnException, FinalAnswerException):
+        # These are the interpreter's internal control-flow signals for
+        # break/continue/return/final_answer, not real errors. They subclass
+        # Exception, so without this guard a `return`/`break`/`continue` inside a
+        # `try:` body would be swallowed by a user `except Exception:` handler
+        # (e.g. `try: return float(x) except Exception: return default` would
+        # always take the except branch). Let them propagate past the handlers.
+        raise
     except Exception as e:
         matched = False
         for handler in try_node.handlers:
@@ -1442,10 +1450,15 @@ def evaluate_ast(
     elif isinstance(expression, ast.FunctionDef):
         return evaluate_function_def(expression, *common_params)
     elif isinstance(expression, ast.Dict):
-        # Dict -> evaluate all keys and values
-        keys = (evaluate_ast(k, *common_params) for k in expression.keys)
-        values = (evaluate_ast(v, *common_params) for v in expression.values)
-        return dict(zip(keys, values))
+        # Dict -> evaluate all keys and values, supporting ** unpacking (key is None)
+        result = {}
+        for k, v in zip(expression.keys, expression.values):
+            value = evaluate_ast(v, *common_params)
+            if k is None:
+                result.update(value)
+            else:
+                result[evaluate_ast(k, *common_params)] = value
+        return result
     elif isinstance(expression, ast.Expr):
         # Expression -> evaluate the content
         return evaluate_ast(expression.value, *common_params)

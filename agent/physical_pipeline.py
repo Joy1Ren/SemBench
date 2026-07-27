@@ -1,7 +1,6 @@
 """Physical pipeline: chain PZ physical operators directly with per-operator model selection."""
 from __future__ import annotations
 
-import copy
 import hashlib
 import inspect
 import json
@@ -15,17 +14,18 @@ import pandas as pd
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
-from palimpzest.constants import Model, PromptStrategy
+from palimpzest.constants import NAIVE_EST_JOIN_SELECTIVITY, Model, PromptStrategy
 from palimpzest.core.elements.filters import Filter
 from palimpzest.core.elements.groupbysig import GroupBySig
-from palimpzest.core.elements.records import DataRecord, DataRecordCollection
+from palimpzest.core.elements.records import DataRecord, DataRecordCollection, DataRecordSet
 from palimpzest.core.lib.schemas import ImageFilepath, _create_pickleable_model, create_schema_from_df
-from palimpzest.core.models import ExecutionStats
+from palimpzest.core.models import ExecutionStats, OperatorCostEstimates, RecordOpStats
 from palimpzest.query.operators.aggregate import ApplyGroupByOp
 from palimpzest.query.operators.convert import LLMConvertBonded, NonLLMConvert
 from palimpzest.query.operators.filter import LLMFilter, NonLLMFilter
-from palimpzest.query.operators.join import NestedLoopsJoin
+from palimpzest.query.operators.join import JoinOp, NestedLoopsJoin
 from palimpzest.query.operators.limit import LimitScanOp
+from palimpzest.query.operators.physical import PhysicalOperator
 from palimpzest.query.operators.project import ProjectOp
 
 NUM_SAMPLES = 10
@@ -61,7 +61,7 @@ class SubsetExecutionContext:
     """Execution context returned by run_subset(), used by QualityEvaluator."""
     sampled_records: list[dict]               # sampled left-side input rows as plain dicts
     output_records: list[dict]                # final pipeline output rows as plain dicts
-    per_sem_op_info: dict[int, dict]          # stage_idx → {op_name, op_type, attributes, samples}
+    per_sem_op_info: dict[int, dict]          # stage_idx → {op_name, op_type, attributes, samples} (all ops, not just semantic)
     has_join: bool
     right_sampled_records: list[dict] | None  # right-side sampled rows if join, else None
 
@@ -95,6 +95,171 @@ def _make_schema(field_defs: dict):
         for k, (ann, fi) in field_defs.items()
     }
     return _create_pickleable_model(safe_defs)
+
+
+# ------------------------------------------------------------------
+# Non-LLM column-suffix physical operator: append a fixed suffix to every column name
+# (a deterministic rename). Useful before a join to disambiguate columns — e.g.
+# left.add_col_suffix("_dish"); right.add_col_suffix("_table") — so the join's inputs
+# have no colliding names.
+# ------------------------------------------------------------------
+
+class NonLLMColSuffix(PhysicalOperator):
+    """Rename every field `name -> f"{name}{suffix}"`. 1:1, deterministic, zero cost."""
+
+    def __init__(self, suffix: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.suffix = suffix
+
+    def get_id_params(self):
+        return {"suffix": self.suffix, **super().get_id_params()}
+
+    def get_op_params(self):
+        return {"suffix": self.suffix, **super().get_op_params()}
+
+    def naive_cost_estimates(self, source_op_cost_estimates: OperatorCostEstimates) -> OperatorCostEstimates:
+        return OperatorCostEstimates(
+            cardinality=source_op_cost_estimates.cardinality,
+            time_per_record=0.0, cost_per_record=0.0, quality=1.0,
+        )
+
+    def __call__(self, candidate: DataRecord) -> DataRecordSet:
+        start_time = time.time()
+        new_dr = DataRecord(
+            self.output_schema,
+            source_indices=candidate.source_indices,
+            parent_ids=[candidate.id],
+        )
+        for field_name in [f.split(".")[-1] for f in candidate.get_field_names()]:
+            out = f"{field_name}{self.suffix}"
+            new_dr.field_types[out] = candidate.get_field_type(field_name)
+            new_dr[out] = candidate[field_name]
+        record_op_stats = RecordOpStats(
+            record_id=new_dr.id,
+            record_parent_ids=new_dr.parent_ids,
+            record_source_indices=new_dr.source_indices,
+            record_state=new_dr.to_dict(include_bytes=False),
+            full_op_id=self.get_full_op_id(),
+            logical_op_id=self.logical_op_id,
+            op_name=self.op_name(),
+            time_per_record=time.time() - start_time,
+            cost_per_record=0.0,
+            fn_call_duration_secs=time.time() - start_time,
+            op_details={k: str(v) for k, v in self.get_id_params().items()},
+        )
+        return DataRecordSet([new_dr], [record_op_stats])
+
+
+# ------------------------------------------------------------------
+# Non-LLM join physical operator (PZ has no non-LLM join; this mirrors PZ's
+# NestedLoopsJoin structure but decides each pair with a Python predicate — the
+# join analogue of PZ's NonLLMFilter / NonLLMConvert).
+# ------------------------------------------------------------------
+
+class NonLLMJoin(JoinOp):
+    """Non-LLM nested-loops join.
+
+    Same execution structure as PZ's ``NestedLoopsJoin`` — nested loops over
+    new/stored left×right with input accumulation across calls (so the total pairs
+    across calls stay |L|×|R|), and a ``DataRecordSet`` (or ``None`` when empty) as
+    output — but each candidate pair is accepted/rejected by a deterministic predicate
+    ``join_fn(left_dict, right_dict) -> bool`` instead of an LLM call. The predicate is
+    fast and I/O-free, so pairs are evaluated sequentially (no ``ThreadPoolExecutor``).
+    """
+
+    def __init__(self, join_fn: Callable[[dict, dict], bool], *args, **kwargs):
+        # JoinOp.__init__ consumes condition/desc and forwards output_schema/input_schema/
+        # depends_on to PhysicalOperator. No model or Generator is created.
+        super().__init__(*args, **kwargs)
+        self.join_fn = join_fn
+        self.join_idx = 0
+        self._left_input_records: list[DataRecord] = []
+        self._right_input_records: list[DataRecord] = []
+        try:
+            self._fn_src = inspect.getsource(join_fn).strip()
+        except (OSError, TypeError):
+            self._fn_src = repr(join_fn)
+
+    def is_image_join(self) -> bool:
+        return False
+
+    def get_id_params(self):
+        id_params = super().get_id_params()
+        return {"join_fn": self._fn_src, **id_params}
+
+    def naive_cost_estimates(
+        self,
+        left_source_op_cost_estimates: OperatorCostEstimates,
+        right_source_op_cost_estimates: OperatorCostEstimates,
+    ) -> OperatorCostEstimates:
+        # deterministic predicate: ~1 ms/pair, no LLM cost, perfect quality
+        cardinality = NAIVE_EST_JOIN_SELECTIVITY * (
+            left_source_op_cost_estimates.cardinality * right_source_op_cost_estimates.cardinality
+        )
+        return OperatorCostEstimates(
+            cardinality=cardinality, time_per_record=0.001, cost_per_record=0.0, quality=1.0,
+        )
+
+    def _process_join_candidate_pair(
+        self, left_candidate: DataRecord, right_candidate: DataRecord,
+    ) -> tuple[list[DataRecord], list[RecordOpStats]]:
+        start_time = time.time()
+        try:
+            passed_operator = bool(self.join_fn(left_candidate.to_dict(), right_candidate.to_dict()))
+        except Exception as e:
+            print(f"Error invoking user-defined function for join: {e}")
+            raise
+        join_dr = DataRecord.from_join_parents(self.output_schema, left_candidate, right_candidate)
+        join_dr.passed_operator = passed_operator
+        elapsed = time.time() - start_time
+        record_op_stats = RecordOpStats(
+            record_id=join_dr.id,
+            record_parent_ids=join_dr.parent_ids,
+            record_source_indices=join_dr.source_indices,
+            record_state=join_dr.to_dict(include_bytes=False),
+            full_op_id=self.get_full_op_id(),
+            logical_op_id=self.logical_op_id,
+            op_name=self.op_name(),
+            time_per_record=elapsed,
+            cost_per_record=0.0,
+            model_name=None,
+            join_condition=self.condition,
+            fn_call_duration_secs=elapsed,
+            answer={"passed_operator": passed_operator},
+            passed_operator=passed_operator,
+            image_operation=False,
+            op_details={k: str(v) for k, v in self.get_id_params().items()},
+        )
+        return [join_dr], [record_op_stats]
+
+    def __call__(
+        self, left_candidates: list[DataRecord], right_candidates: list[DataRecord],
+    ) -> tuple[DataRecordSet | None, int]:
+        # Mirror NestedLoopsJoin.__call__: join new×new, new×stored, stored×new, then
+        # accumulate this call's inputs for future calls.
+        output_records, output_record_op_stats, num_inputs_processed = [], [], 0
+
+        def _join_all(lefts, rights):
+            nonlocal num_inputs_processed
+            for left_candidate in lefts:
+                for right_candidate in rights:
+                    recs, stats = self._process_join_candidate_pair(left_candidate, right_candidate)
+                    output_records.extend(recs)
+                    output_record_op_stats.extend(stats)
+                    num_inputs_processed += 1
+
+        _join_all(left_candidates, right_candidates)            # new left × new right
+        _join_all(left_candidates, self._right_input_records)   # new left × stored right
+        _join_all(self._left_input_records, right_candidates)   # stored left × new right
+
+        # store input records to join with new records added later
+        self._left_input_records.extend(left_candidates)
+        self._right_input_records.extend(right_candidates)
+
+        # return None if no output records were produced (matches NestedLoopsJoin)
+        if len(output_records) == 0:
+            return None, num_inputs_processed
+        return DataRecordSet(output_records, output_record_op_stats), num_inputs_processed
 
 
 # ------------------------------------------------------------------
@@ -197,13 +362,14 @@ class SemJoin(Operator):
 
     def __init__(
         self,
-        other: "PhysicalPipeline",
+        other: "PhysicalPipeline | None",
         condition: str,
         model: Model,
         join_parallelism: int,
         depends_on: list[str] | None,
         schema,
         reasoning_effort_override: str | None = None,
+        self_join: bool = False,
     ):
         super().__init__()
         self.model = model
@@ -219,7 +385,12 @@ class SemJoin(Operator):
         )
         self._pz_op.model = model
         self.depends_on = depends_on
+        # For a self-join `other` is None: the left upstream is run ONCE and its output is
+        # joined with itself (see PhysicalPipeline.sem_join / _execute_core). This is a
+        # common-subexpression optimization *beyond* PZ — PZ's Cascades groups dedupe only
+        # in the optimizer memo, and its extracted physical plan runs the upstream twice.
         self.other = other
+        self.self_join = self_join
         self.attributes = {"condition": condition, "model": model.value, "join_parallelism": join_parallelism, "depends_on": depends_on}
         self.params_id = _compute_op_id(self.op_type, {"model": model.value})
         # self.params_id = _compute_op_id(self.op_type, self.attributes)
@@ -267,6 +438,50 @@ class Map(Operator):
         col_names = sorted(col["name"] for col in cols)
         self.attributes = {"cols": col_names, "udf": fn_src}
         self.params_id = _compute_op_id(self.op_type, {"cols": col_names, "udf": fn_src})
+
+
+class Join(Operator):
+    """Exact (non-LLM) nested-loops join via a Python predicate."""
+    stage_type = "join"
+    op_type = "join"
+
+    def __init__(self, other: "PhysicalPipeline | None", condition_fn: Callable[[dict, dict], bool], schema, depends_on: list[str] | None = None, self_join: bool = False):
+        super().__init__()
+        try:
+            fn_src = inspect.getsource(condition_fn).strip()
+        except (OSError, TypeError):
+            fn_src = repr(condition_fn)
+        self._pz_op = NonLLMJoin(
+            join_fn=condition_fn,
+            condition=fn_src,
+            output_schema=schema,
+            input_schema=schema,
+            depends_on=depends_on,
+        )
+        self._fn = condition_fn  # preserved for make_oracle_copy
+        # For a self-join `other` is None (left run once, joined with itself). See SemJoin.
+        self.other = other
+        self.self_join = self_join
+        self.depends_on = depends_on
+        self.attributes = {"condition": fn_src, "depends_on": depends_on}
+        self.params_id = _compute_op_id(self.op_type, {"condition": fn_src})
+
+
+class AddColSuffix(Operator):
+    """Append a fixed suffix to every column name (non-LLM rename)."""
+    stage_type = "convert"   # per-record transform; dispatched like map/convert
+    op_type = "add_col_suffix"
+
+    def __init__(self, suffix: str, input_schema, output_schema):
+        super().__init__()
+        self._pz_op = NonLLMColSuffix(
+            suffix=suffix,
+            output_schema=output_schema,
+            input_schema=input_schema,
+        )
+        self.suffix = suffix   # preserved for make_oracle_copy
+        self.attributes = {"suffix": suffix}
+        self.params_id = _compute_op_id(self.op_type, {"suffix": suffix})
 
 
 class Project(Operator):
@@ -369,14 +584,27 @@ class PhysicalPipeline:
 
     def _flat_ops(self) -> list[tuple[str, "Operator"]]:
         """All operators in topological order with display names.
-        Right-branch operators of a SemJoin appear before the join itself."""
+
+        The display name is `{plan_name}_op{N}_{op_type}` — e.g. `p1_shoe_op3_sem_filter`.
+        It carries (a) which pipeline the op belongs to (`plan_name`, which the caller should
+        set meaningfully, e.g. "p1_shoe"; a two-input join's right branch uses its own
+        pipeline's plan_name), (b) the op's position `N` within that pipeline, and (c) the
+        op type, so plan printouts and per-operator results/samples are self-describing. The
+        name is only a display string / dict key (uniqueness is the only requirement) — it is
+        never used to match plan↔oracle ops (that is done by stage index) or for cost-model
+        lookup (that uses `params_id`), so the format is free to change.
+
+        Right-branch operators of a two-input join appear before the join itself. A
+        self-join has NO right branch: its upstream runs once (shared by both sides), so it
+        already appears once in the main chain (a common-subexpression optimization beyond
+        PZ, whose physical plan would instead have two instances of the upstream)."""
         result = []
         main_idx = 1
         for op in self._ops:
-            if isinstance(op, SemJoin):
+            if op.stage_type == "join" and not getattr(op, "self_join", False):
                 for name, right_op in op.other._flat_ops():
                     result.append((name, right_op))
-            result.append((f"{self.plan_name}_op{main_idx}", op))
+            result.append((f"{self.plan_name}_op{main_idx}_{op.op_type}", op))
             main_idx += 1
         return result
 
@@ -433,12 +661,30 @@ class PhysicalPipeline:
     ) -> "PhysicalPipeline":
         """
         LLM-based join. Keeps pairs of (self record, other record) where condition holds.
-        Self fields win on name collision with other fields.
+
+        On a name collision, the left (self) field keeps its name and the right (other)
+        field is suffixed with "_right" (repeatedly, if needed). This mirrors Palimpzest's
+        own join semantics (see union_schemas(join=True) and DataRecord.from_join_parents),
+        so downstream operators can reference right-side columns as e.g. "prod_id_right".
+
+        Self-join: `pipeline.sem_join(pipeline, ...)` is supported. The upstream is executed
+        ONCE and joined with its own output (see _execute_core), so it is not recomputed and
+        its cost is counted once. This is a common-subexpression optimization *beyond* PZ:
+        PZ's Cascades groups dedupe only in the optimizer memo, and its extracted physical
+        plan runs the shared upstream twice (two instances, differentiated by topo index).
         """
-        merged_defs = {**other._defs, **self._defs}
+        is_self = other is self
+        right_defs = self._defs if is_self else other._defs
+        merged_defs = dict(self._defs)  # left fields keep their names
+        for name, field_def in right_defs.items():
+            new_name = name
+            while new_name in merged_defs:
+                new_name = f"{new_name}_right"
+            merged_defs[new_name] = field_def
         joined_schema = _make_schema(merged_defs)
         self._ops.append(SemJoin(
-            other=other,
+            other=None if is_self else other,
+            self_join=is_self,
             condition=condition,
             model=model,
             join_parallelism=join_parallelism,
@@ -479,6 +725,57 @@ class PhysicalPipeline:
         self._ops.append(Map(udf=udf, cols=cols, input_schema=self._schema, output_schema=output_schema))
         self._defs = {**self._defs, **new_defs}
         self._schema = output_schema
+        return self
+
+    def add_col_suffix(self, suffix: str) -> "PhysicalPipeline":
+        """Append `suffix` to every column name (a non-LLM, deterministic rename).
+
+        Useful before a join to disambiguate columns so there are no name collisions, e.g.
+            left.add_col_suffix("_dish")
+            right.add_col_suffix("_table")
+            left.join(right, lambda l, r: l["brand_dish"] == r["brand_table"])
+        """
+        renamed_defs = {f"{name}{suffix}": field_def for name, field_def in self._defs.items()}
+        output_schema = _make_schema(renamed_defs)
+        self._ops.append(AddColSuffix(suffix=suffix, input_schema=self._schema, output_schema=output_schema))
+        self._defs = renamed_defs
+        self._schema = output_schema
+        return self
+
+    def join(
+        self,
+        other: "PhysicalPipeline",
+        condition_fn: Callable[[dict, dict], bool],
+        depends_on: list[str] | None = None,
+    ) -> "PhysicalPipeline":
+        """
+        Exact (non-LLM) join. Keeps pairs (self record, other record) where
+        condition_fn(left_dict, right_dict) is True.
+
+        condition_fn receives two dicts — the left record and the right record, each with
+        their own (pre-join) field names — and returns a bool, e.g.
+        `lambda l, r: l["brand"] == r["brand"] and l["category"] == r["category"]`.
+
+        Schema merging mirrors sem_join: on a name collision the left field keeps its name
+        and the right field is suffixed with "_right", so downstream operators reference
+        right-side columns as e.g. "prod_id_right".
+
+        Self-join (`pipeline.join(pipeline, ...)`) is supported: the upstream is executed
+        ONCE and joined with its own output (not recomputed) — a common-subexpression
+        optimization beyond PZ, which runs the shared upstream twice. See sem_join.
+        """
+        is_self = other is self
+        right_defs = self._defs if is_self else other._defs
+        merged_defs = dict(self._defs)  # left fields keep their names
+        for name, field_def in right_defs.items():
+            new_name = name
+            while new_name in merged_defs:
+                new_name = f"{new_name}_right"
+            merged_defs[new_name] = field_def
+        joined_schema = _make_schema(merged_defs)
+        self._ops.append(Join(other=None if is_self else other, self_join=is_self, condition_fn=condition_fn, schema=joined_schema, depends_on=depends_on))
+        self._defs = merged_defs
+        self._schema = joined_schema
         return self
 
     def project(self, cols: list[str]) -> "PhysicalPipeline":
@@ -550,7 +847,7 @@ class PhysicalPipeline:
         initial_records = self._build_initial_records(self._df)
         return self._execute_core(initial_records, max_samples=5)
 
-    def _execute_core(self, initial_records: list[DataRecord], max_samples: int, skip_limit: bool = False) -> tuple[list[DataRecord], list, dict, dict]:
+    def _execute_core(self, initial_records: list[DataRecord], max_samples: int, skip_limit: bool = False, _executor=None) -> tuple[list[DataRecord], list, dict, dict]:
         from concurrent.futures import wait as fut_wait
         _POLL_INTERVAL = 0.3
 
@@ -562,6 +859,17 @@ class PhysicalPipeline:
         for flat_idx, (op_name, op) in enumerate(self._flat_ops()):
             op.logical_op_id = op.params_id
             op._pz_op.logical_op_id = op.params_id
+            # Reset a join operator's cross-call accumulation before each run. NestedLoopsJoin /
+            # NonLLMJoin keep _left/_right_input_records to build the full cross product from
+            # incrementally-fed batches WITHIN a single run. But the pipeline is cached and
+            # reused (e.g. execute_subplan stores it per plan), so without this reset a SECOND
+            # execution would join the new records against the STALE ones from the first —
+            # wrong results and a runaway counter (a 2nd run_subset on a 10-row join prints
+            # "…400 JOINED" instead of ≤100). join_idx (PZ's per-pair print counter) is reset too.
+            if op.stage_type == "join":
+                op._pz_op._left_input_records = []
+                op._pz_op._right_input_records = []
+                op._pz_op.join_idx = 0
             stage_map[flat_idx] = {
                 "logical_op_id": op.params_id,
                 "op_name": op_name,
@@ -579,6 +887,22 @@ class PhysicalPipeline:
         # are captured alongside main-pipeline ops.
         op_sample_pairs: dict[int, list] = {}  # id(op) -> [(input_dr, future)]
 
+        # Join ops can't link inputs→outputs the same way (their "input" is a pair of
+        # records), so they're collected separately as already-resolved
+        # (pair_record, pair_record | None) tuples — None when the pair failed the join.
+        # Unlike op_sample_pairs (capped at _MAX_SAMPLES for agent exploration), we keep
+        # EVERY join pair: the oracle quality judge scores the sem_join over all of its
+        # input→output pairs, keyed by each pair record's source_indices (left + right).
+        join_op_samples: dict[int, list[tuple]] = {}  # id(join_op) -> [(pair_dr, pair_dr|None)]
+
+        def _collect_join_samples(op_key: int, result_set) -> None:
+            if result_set is None:
+                return
+            bucket = join_op_samples.setdefault(op_key, [])
+            for dr in result_set.data_records:
+                passed = bool(getattr(dr, "passed_operator", False))
+                bucket.append((dr, dr if passed else None))
+
         # Main pipeline queues
         input_queues: dict[int, list] = {i: [] for i in range(n_ops)}
         future_queues: dict[int, list] = {i: [] for i in range(n_ops)}
@@ -595,19 +919,29 @@ class PhysicalPipeline:
         }
         _join_call_counts: dict[int, int] = {}  # diagnostic: how many times each join fires
 
-        # Initialize right-pipeline state for each join stage.
+        # Initialize right-pipeline state for each two-input join stage. (A self-join has no
+        # separate right pipeline — its upstream runs once and is joined with itself — so it
+        # gets no right_state and is handled directly in the join branch below.)
         # Each tick the right pipeline advances by batch_size records, matching PZ's scan batching.
         right_state: dict[int, dict] = {}
         for i, op in enumerate(self._ops):
-            if op.stage_type != "join":
+            if op.stage_type != "join" or getattr(op, "self_join", False):
                 continue
             other = op.other
             r_initial: list[DataRecord] = other._build_initial_records(other._df)
-            for r_op in other._ops:
-                if r_op.logical_op_id is None:
-                    r_op.logical_op_id = r_op.params_id
-                r_op._pz_op.logical_op_id = r_op.logical_op_id
-            n_r = len(other._ops)
+            # If the right pipeline itself contains a join op, the tick-by-tick right
+            # advancement loop (which only handles filter/convert/project/groupby) cannot
+            # dispatch it. We mark has_right_join=True and submit the right pipeline as a
+            # future once the executor starts, so it runs in parallel with the left pipeline.
+            # The outer join uses incremental mode for this case, firing as right records
+            # arrive rather than waiting for rs["done"].
+            has_right_join = any(r_op.stage_type == "join" for r_op in other._ops)
+            if not has_right_join:
+                for r_op in other._ops:
+                    if r_op.logical_op_id is None:
+                        r_op.logical_op_id = r_op.params_id
+                    r_op._pz_op.logical_op_id = r_op.logical_op_id
+            n_r = 0 if has_right_join else len(other._ops)
             right_state[i] = {
                 "other": other,
                 "n": n_r,
@@ -618,10 +952,31 @@ class PhysicalPipeline:
                 "pending": [],             # right records ready for this tick's join call (incremental)
                 "all_right": [],           # all right records produced so far (barrier join)
                 "done": n_r == 0 and len(r_initial) == 0,
+                "has_right_join": has_right_join,
+                "right_future": None,      # set below once executor is live
             }
 
         def any_pending() -> bool:
-            return any(input_queues[i] or future_queues[i] for i in range(n_ops))
+            if any(input_queues[i] or future_queues[i] for i in range(n_ops)):
+                return True
+            # A join's right sub-pipeline keeps its OWN queues (right_state), separate from the
+            # main input/future queues. Keep the loop alive while any right side is still
+            # producing. This matters now that the incremental join pops ALL available left at
+            # once (mirroring PZ): the main queues can empty before the right side finishes, and
+            # without this check the loop would exit early and drop the remaining right records.
+            #
+            # NOTE: we intentionally do NOT keep the loop alive on a non-empty rs["pending"].
+            # The incremental path consumes pending the same tick it is produced, whereas the
+            # barrier path drains rs["all_right"] and leaves rs["pending"] populated — checking
+            # pending here would livelock a barrier join after it has already finished.
+            for rstate in right_state.values():
+                if not rstate["done"]:
+                    return True
+                if rstate.get("right_future") is not None:
+                    return True
+                if any(rstate["iq"].get(j) or rstate["fq"].get(j) for j in range(rstate["n"])):
+                    return True
+            return False
 
         def upstream_done(stage_idx: int) -> bool:
             return all(not input_queues[i] and not future_queues[i] for i in range(stage_idx))
@@ -641,8 +996,34 @@ class PhysicalPipeline:
                     print(f"[pipeline] record-level operator error (skipping record): {type(_exc).__name__}: {_exc}")
             return passing
 
-        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+        def _run(executor):
+            # Submit right pipelines that contain joins as background futures so they run
+            # in parallel with the left pipeline. The shared executor is passed down so the
+            # right pipeline's operators compete for the same worker slots — at most
+            # max_workers threads are active at any time. One slot is consumed by the right
+            # pipeline's scheduling loop while it runs; the remaining slots service operators
+            # from both branches.
+            for i, rs in right_state.items():
+                if rs["has_right_join"]:
+                    r_snap = rs["initial"][:]
+                    other_pipe = rs["other"]
+                    rs["right_future"] = executor.submit(
+                        other_pipe._execute_core, r_snap, max_samples, skip_limit, executor
+                    )
+                    rs["done"] = False
+
             while any_pending():
+                # Drain completed right-pipeline futures into pending / all_right so the
+                # incremental join path can consume them this tick.
+                for rs in right_state.values():
+                    if rs.get("right_future") is not None and rs["right_future"].done():
+                        recs, stats, _, _ = rs["right_future"].result()
+                        all_record_op_stats.extend(stats)
+                        rs["pending"].extend(recs)
+                        rs["all_right"].extend(recs)
+                        rs["right_future"] = None
+                        rs["done"] = True
+
 
                 # Advance main pipeline
                 for stage_idx, op in enumerate(self._ops):
@@ -680,6 +1061,29 @@ class PhysicalPipeline:
                         input_queues[stage_idx].clear()
                         future_queues[stage_idx].append(executor.submit(op, batch))
 
+                    elif op.stage_type == "join" and getattr(op, "self_join", False):
+                        # Self-join: the upstream ran ONCE and its output is now in this
+                        # stage's input queue. Join that output with ITSELF — feed the same
+                        # records as both left and right — so the upstream is not recomputed.
+                        # (This is a common-subexpression optimization beyond PZ, which unfolds
+                        # the shared side into two instances and runs it twice.) The operator's
+                        # accumulation builds the full L×L cross product from the streamed
+                        # batches, exactly as it does for a two-input join.
+                        join_pz_op = op._pz_op
+                        has_dl = join_has_downstream_limit[stage_idx]
+                        fire = (input_queues[stage_idx] and
+                                (has_dl or upstream_done(stage_idx)))
+                        if fire:
+                            left_batch = input_queues[stage_idx][:]
+                            input_queues[stage_idx].clear()
+                            _join_call_counts[stage_idx] = _join_call_counts.get(stage_idx, 0) + 1
+                            result_set, _ = join_pz_op(left_batch, left_batch)
+                            _collect_join_samples(id(op), result_set)
+                            if result_set is not None:
+                                future_queues[stage_idx].append(
+                                    executor.submit(lambda rset=result_set: rset)
+                                )
+
                     elif op.stage_type == "join":
                         join_pz_op = op._pz_op
                         other = op.other
@@ -692,7 +1096,11 @@ class PhysicalPipeline:
                         # Advance right pipeline by one tick (mirrors PZ's scan batching).
                         # Feed the next batch_size right records through the right ops each tick,
                         # so the join sees at most batch_size left × batch_size right per call.
-                        if not rs["done"]:
+                        # Skip for has_right_join pipelines: they run as a background future and
+                        # must not be touched inline (r_iq/r_fq are empty, other._ops is non-empty,
+                        # and initial records are raw/unprocessed — advancing inline would both
+                        # KeyError on r_iq and feed wrong records into pending).
+                        if not rs["done"] and not rs["has_right_join"]:
                             n_remaining = len(rs["initial"]) - rs["n_fed"]
                             n_feed = min(batch_size if batch_size is not None else n_remaining, n_remaining)
                             new_right = rs["initial"][rs["n_fed"]:rs["n_fed"] + n_feed]
@@ -736,24 +1144,35 @@ class PhysicalPipeline:
 
                         # Fire join
                         if has_dl:
-                            # Incremental: pair this tick's batch_size left with this tick's right output.
-                            # Matches PZ's join_has_downstream_limit_op path: fires as soon as both
-                            # sides have records without waiting for upstream to finish.
-                            left_batch = input_queues[stage_idx][:batch_size]
-                            input_queues[stage_idx] = input_queues[stage_idx][len(left_batch):]
+                            # Incremental path — mirrors PZ's join_has_downstream_limit_op branch.
+                            # Pop ALL available left records and ALL pending right records, then call
+                            # the join whenever EITHER side is non-empty. NestedLoopsJoin accumulates
+                            # _left_input_records / _right_input_records, so a call with one side
+                            # empty simply stores the other side for future pairs — nothing is
+                            # dropped — and later calls only compute the new cross-terms (total
+                            # across calls stays L*R).
+                            #
+                            # The join runs SYNCHRONOUSLY, exactly like PZ: we do not submit it to
+                            # the executor because it mutates shared accumulation state and
+                            # concurrent join calls would race (see PZ's note at
+                            # parallel_execution_strategy.py:149-151). Popping all available left
+                            # (instead of a batch_size slice) gives the join's own thread pool
+                            # larger, better-saturated batches; the amount actually available is
+                            # already throttled by the upstream operators' batch_size feeding.
+                            #
+                            # For has_right_join pipelines the right records arrive all at once
+                            # when the background future completes (drained into rs["pending"]
+                            # above). The incremental path handles this naturally: it fires with
+                            # whatever left is available vs the newly-arrived right batch, then
+                            # keeps firing on subsequent ticks as more left records come in.
+                            left_batch = input_queues[stage_idx][:]
                             right_batch = rs["pending"][:]
-                            rs["pending"] = []
-                            if left_batch and right_batch:
+                            if left_batch or right_batch:
+                                input_queues[stage_idx].clear()
+                                rs["pending"] = []
                                 _join_call_counts[stage_idx] = _join_call_counts.get(stage_idx, 0) + 1
-                                prev_l = len(join_pz_op._left_input_records)
-                                prev_r = len(join_pz_op._right_input_records)
-                                pairs = (len(left_batch) * len(right_batch)
-                                         + len(left_batch) * prev_r
-                                         + prev_l * len(right_batch))
-                                # print(f"[join call #{_join_call_counts[stage_idx]} stage={stage_idx}] "
-                                #       f"new_l={len(left_batch)} new_r={len(right_batch)} "
-                                #       f"prev_l={prev_l} prev_r={prev_r} => {pairs} pairs")
                                 result_set, _ = join_pz_op(left_batch, right_batch)
+                                _collect_join_samples(id(op), result_set)
                                 if result_set is not None:
                                     future_queues[stage_idx].append(
                                         executor.submit(lambda rset=result_set: rset)
@@ -773,6 +1192,7 @@ class PhysicalPipeline:
                             #       f"left={len(left_batch)} right={len(rs['all_right'])} "
                             #       f"prev_l={prev_l} prev_r={prev_r} => {pairs} pairs")
                             result_set, _ = join_pz_op(left_batch, rs["all_right"])
+                            _collect_join_samples(id(op), result_set)
                             if result_set is not None:
                                 future_queues[stage_idx].append(
                                     executor.submit(lambda rset=result_set: rset)
@@ -795,11 +1215,21 @@ class PhysicalPipeline:
                 if limit_val is not None and len(output_records) >= limit_val:
                     break
 
+        # _run is defined above and closes here. Dispatch: if a shared executor was
+        # passed in (we're already inside a parent's ThreadPoolExecutor), use it directly
+        # so both pipelines share the same worker pool. Otherwise create our own.
+        if _executor is not None:
+            _run(_executor)
+        else:
+            with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                _run(executor)
+
         # if _join_call_counts:
         #     print(f"[join summary] calls per stage: {_join_call_counts}")
 
         # Resolve per-record sample futures → (input_dr, output_dr | None) pairs.
-        # Join and groupby stages have no samples (can't link inputs to outputs).
+        # Groupby stages have no samples (can't link inputs to outputs). Join stages
+        # are collected separately (join_op_samples) as already-resolved pair tuples.
         # Keyed by id(op) so both main-pipeline and right-branch ops are included.
         op_samples: dict[int, list[tuple]] = {}
         for op_key, pairs in op_sample_pairs.items():
@@ -811,6 +1241,9 @@ class PhysicalPipeline:
                     op_samples[op_key].append((inp, out_recs[0] if out_recs else None))
                 except Exception:
                     op_samples[op_key].append((inp, None))
+
+        # Merge in join pair samples (already resolved to (pair_dr, pair_dr | None)).
+        op_samples.update(join_op_samples)
 
         return output_records[:limit_val] if limit_val is not None else output_records, all_record_op_stats, stage_map, op_samples
 
@@ -933,17 +1366,20 @@ class PhysicalPipeline:
         num_samples: int = NUM_SAMPLES,
         seed: int = SUBSET_SEED,
         subset_cache_path: str | None = None,
-    ) -> tuple[list[dict], SubsetExecutionContext]:
+    ) -> tuple[list[dict], SubsetExecutionContext, dict]:
         """Execute on a random sample of num_samples records.
 
         If subset_cache_path is given and the file already exists, the cached
         rows are loaded instead of resampling.  If the file does not exist yet
         the sample is drawn as usual and written to that path.
 
-        Returns (per_op_list, SubsetExecutionContext).
-        per_op_list: same schema as run() but stats are from the subset.
-        SubsetExecutionContext: sampled records, output records, and per-LLM-op samples
-          for use by QualityEvaluator.
+        Returns (per_op_list, SubsetExecutionContext, plan_dict).
+        per_op_list: same schema as run() but stats are from the subset; each op's
+          latency_s is a SUM of per-record times (serial-equivalent; used by the cost model).
+        SubsetExecutionContext: sampled records, output records, and per-op samples
+          (all operators, semantic and non-semantic) for use by QualityEvaluator and get_op_samples.
+        plan_dict: plan-level totals; plan_dict["latency_s"] is the WALL-CLOCK time of the
+          subset execution (real elapsed, reflecting parallelism).
         """
         import os as _os
         if subset_cache_path is not None and _os.path.exists(subset_cache_path):
@@ -966,25 +1402,51 @@ class PhysicalPipeline:
         right_sampled_records: list[dict] | None = None
 
         if has_join:
+            # Load the cached subset once so a self-join draws both sides from the
+            # SAME rows. Independently resampling the right side (below) would give a
+            # different row set whenever the cache is stale w.r.t. the source, silently
+            # dropping pairs that only exist on one side.
+            cached_subset_df: "pd.DataFrame | None" = None
+            if subset_cache_path is not None and _os.path.exists(subset_cache_path):
+                cached_subset_df = pd.read_csv(subset_cache_path).reset_index(drop=True)
+
             right_sampled_records = []
             for op in self._ops:
+                if op.stage_type == "join" and getattr(op, "self_join", False):
+                    # Self-join: right side IS the left side (run once); no separate right _df.
+                    right_sampled_records.extend(sampled_records_list)
+                    continue
                 if op.stage_type == "join":
                     other = op.other
                     oid = id(other)
                     if oid not in right_df_backup:
                         right_df_backup[oid] = other._df
-                        n_r = min(num_samples, len(other._df))
-                        other._df = other._df.sample(n=n_r, random_state=seed).reset_index(drop=True)
+                        # Reuse the cached subset when it covers the right source's
+                        # columns (self-join); otherwise fall back to sampling.
+                        if cached_subset_df is not None and set(other._df.columns).issubset(cached_subset_df.columns):
+                            right_df = cached_subset_df[list(other._df.columns)].copy().reset_index(drop=True)
+                            for col in right_df.columns:
+                                try:
+                                    right_df[col] = right_df[col].astype(other._df[col].dtype)
+                                except (ValueError, TypeError):
+                                    pass
+                            other._df = right_df
+                        else:
+                            n_r = min(num_samples, len(other._df))
+                            other._df = other._df.sample(n=n_r, random_state=seed).reset_index(drop=True)
                     right_sampled_records.extend(other._df.to_dict(orient="records"))
 
+        subset_wall_s = 0.0
         try:
             initial_records = self._build_initial_records(sampled_df)
+            _subset_start = time.time()
             records, all_record_op_stats, stage_map, op_samples = self._execute_core(
                 initial_records, max_samples=num_samples, skip_limit=True
             )
+            subset_wall_s = time.time() - _subset_start
         finally:
             for op in self._ops:
-                if op.stage_type == "join":
+                if op.stage_type == "join" and op.other is not None:
                     oid = id(op.other)
                     if oid in right_df_backup:
                         op.other._df = right_df_backup[oid]
@@ -1020,25 +1482,42 @@ class PhysicalPipeline:
                 "num_passed": s["num_passed"],
             })
 
-        # Convert output DataRecords to plain dicts
+        # Convert output DataRecords to plain dicts; replace None/NaN in str-typed
+        # fields with "" so downstream evaluators (e.g. adjusted-rand-index) don't crash.
+        def _is_str_ann(ann) -> bool:
+            import typing as _t
+            if ann is str:
+                return True
+            if _t.get_origin(ann) is _t.Union:
+                return str in _t.get_args(ann)
+            return False
+
         def _dr_to_dict(dr: DataRecord) -> dict:
+            import math as _math
             schema_cls = dr.schema if isinstance(dr.schema, type) else type(dr.schema)
-            return {k: getattr(dr, k, None) for k in schema_cls.model_fields}
+            result = {}
+            for k, finfo in schema_cls.model_fields.items():
+                v = getattr(dr, k, None)
+                if _is_str_ann(finfo.annotation) and (
+                    v is None or (isinstance(v, float) and _math.isnan(v))
+                ):
+                    v = ""
+                result[k] = v
+            return result
 
         output_records = [_dr_to_dict(dr) for dr in records]
 
-        # Collect per-LLM-op info: keyed by flat_idx from _flat_ops() so that
-        # op names are consistent with per_op_list (which also uses _flat_ops() names).
+        # Collect per-op info for all operators (semantic and non-semantic): keyed by
+        # flat_idx from _flat_ops() so that op names are consistent with per_op_list.
         # op_samples is keyed by id(op), so right-branch ops are included automatically.
         per_sem_op_info: dict[int, dict] = {}
         for flat_idx, (op_name, op) in enumerate(self._flat_ops()):
-            if "model" in op.attributes:
-                per_sem_op_info[flat_idx] = {
-                    "op_name": op_name,
-                    "op_type": op.op_type,
-                    "attributes": op.attributes,
-                    "samples": op_samples.get(id(op), []),
-                }
+            per_sem_op_info[flat_idx] = {
+                "op_name": op_name,
+                "op_type": op.op_type,
+                "attributes": op.attributes,
+                "samples": op_samples.get(id(op), []),
+            }
 
         context = SubsetExecutionContext(
             sampled_records=sampled_records_list,
@@ -1047,7 +1526,19 @@ class PhysicalPipeline:
             has_join=has_join,
             right_sampled_records=right_sampled_records,
         )
-        return per_op_list, context
+        # plan_dict mirrors run(): latency_s is the WALL-CLOCK time of the subset
+        # _execute_core (real elapsed time, reflecting parallelism), as opposed to the
+        # per-op latency_s in per_op_list, which is a SUM of per-record times (serial-
+        # equivalent, used by the cost model). Callers that want to report the real
+        # subset execution time should use plan_dict["latency_s"].
+        plan_dict = {
+            "plan_name": self.plan_name,
+            "latency_s": subset_wall_s,
+            "cost_usd": sum(op["cost_usd"] for op in per_op_list),
+            "input_tokens": sum(op["input_tokens"] for op in per_op_list),
+            "output_tokens": sum(op["output_tokens"] for op in per_op_list),
+        }
+        return per_op_list, context, plan_dict
 
     # ------------------------------------------------------------------
     # Oracle copy (for QualityEvaluator)
@@ -1085,7 +1576,8 @@ class PhysicalPipeline:
                         reasoning_effort_override=oracle_reasoning_effort,
                     )
             elif isinstance(op, SemJoin):
-                oracle_other = op.other.make_oracle_copy(oracle_model, oracle_reasoning_effort)
+                # For a self-join, join the oracle with itself; else oracle-copy the right side.
+                oracle_other = oracle if op.self_join else op.other.make_oracle_copy(oracle_model, oracle_reasoning_effort)
                 oracle.sem_join(
                     other=oracle_other,
                     condition=op.attributes["condition"],
@@ -1094,6 +1586,15 @@ class PhysicalPipeline:
                     depends_on=getattr(op, "depends_on", None),
                     reasoning_effort_override=oracle_reasoning_effort,
                 )
+            elif isinstance(op, Join):
+                oracle_other = oracle if op.self_join else op.other.make_oracle_copy(oracle_model, oracle_reasoning_effort)
+                fn = getattr(op, "_fn", None)
+                if fn is not None:
+                    oracle.join(
+                        other=oracle_other,
+                        condition_fn=fn,
+                        depends_on=getattr(op, "depends_on", None),
+                    )
             elif isinstance(op, ExactFilter):
                 fn = getattr(op, "_fn", None)
                 if fn is not None:
@@ -1103,6 +1604,8 @@ class PhysicalPipeline:
                 cols = getattr(op, "_cols_full", None)
                 if udf is not None and cols:
                     oracle.map(udf, cols)
+            elif isinstance(op, AddColSuffix):
+                oracle.add_col_suffix(op.suffix)
             elif isinstance(op, Project):
                 oracle.project(op.attributes["project_cols"])
             elif isinstance(op, Limit):

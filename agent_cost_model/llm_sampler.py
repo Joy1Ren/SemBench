@@ -1,7 +1,7 @@
 """LLM-guided importance sampling for the quality-evaluation subset.
 
 The ``CostModelAgent`` scores each candidate query plan on a small shared subset
-of rows (``agent_cost_model/datasubset/{use_case}/Q{id}_subset.csv``).  Drawing
+of rows (``agent_cost_model/datasubset/{use_case}/sf_{scale_factor}/Q{id}_subset.csv``).  Drawing
 that subset uniformly at random often yields rows that are irrelevant to the
 query's semantic predicates, so plan-quality differences wash out.
 
@@ -112,8 +112,37 @@ Query: "Based on product images and descriptions, find all-white furniture sets 
 Furniture sets consist of a sofa, a coffee table (less than $500), and a rug (made from nylon)"
 Answer:
 [{"filter": null, "description": "white. sofa, couch, settee"},
- {"filter": "row[\\"price\\"] < 500", "description": "white. coffee table"},
+ {"filter": "row[\\"length\\"] < 40", "description": "white. coffee table"},
  {"filter": "row[\\"materials\\"] == 'nylon'", "description": "white. rug, carpet, mat"}]
+"""
+
+
+# Used when semantic descriptions cannot contribute to scoring (no usable text/image
+# embedding and no keyword matching) -- e.g. an image-only query run with
+# no_image_emb. Then we only ask for non-semantic filters.
+_SYSTEM_PROMPT_FILTER_ONLY = """You help build a small, *informative* evaluation subset for a data query.
+
+You are given a natural-language query over a table of rows and the table's columns.
+Identify the non-semantic FILTERS that select the rows relevant to the query, so we
+can over-sample from them.
+
+Return ONLY a JSON array. Each element is an object with a single key:
+  - "filter": a Python boolean expression over a variable named `row`
+              (e.g. "row[\\"price\\"] <= 500", "row[\\"gender\\"] == 'Men'").
+              Use ONLY simple, deterministic column predicates (comparisons,
+              membership) over the columns shown -- never anything that requires
+              understanding an image or free text.
+
+Guidelines:
+  - Emit one array element per independent filter condition expressible from the
+    structured columns.
+  - If the query has no useful filter, return an empty array [].
+
+Example:
+Query: "Find men's products priced at $500 or less."
+Answer:
+[{"filter": "row[\\"gender\\"] == 'Men'"},
+ {"filter": "row[\\"price\\"] <= 500"}]
 """
 
 
@@ -127,6 +156,7 @@ class LLM_Sampler:
         query_text: str,
         df: pd.DataFrame,
         *,
+        scale_factor: int,
         llm_client: Any,
         embedding_model: str = "qwen/qwen3-embedding-8b",
         id_col: str = "prod_id",
@@ -135,6 +165,7 @@ class LLM_Sampler:
         sample_size: int = NUM_SAMPLES,
         sample_method: str = "importance-sampling",
         keyword: bool = False,
+        no_image_emb: bool = False,
         seed: int = SUBSET_SEED,
         cache_dir: str | None = None,
         subset_out_path: str | None = None,
@@ -147,12 +178,17 @@ class LLM_Sampler:
             )
         self.query_id = query_id
         self.use_case = use_case
+        self.scale_factor = scale_factor
         self.query_text = query_text
         self.df = df.reset_index(drop=True)
         self.llm_client = llm_client
         self.embedding_model = embedding_model
         self.id_col = id_col
         self.image_dir = image_dir
+        self.no_image_emb = no_image_emb
+        # Single gate for all image work (embedding, similarity, cost). When
+        # no_image_emb is set we ignore images entirely even if the dataset has them.
+        self._use_image = bool(image_dir) and not no_image_emb
         self.sample_size = sample_size
         self.sample_method = sample_method
         self.keyword = keyword
@@ -171,10 +207,11 @@ class LLM_Sampler:
 
         self.cache_dir = pathlib.Path(cache_dir or f"agent_cost_model/sampling/{use_case}")
         self.cached_results_dir = self.cache_dir / "cached_results"
-        self.results_path = self.cache_dir / "results.json"
+        print(f"Using cached results from: {self.cached_results_dir}")
+        self.results_path = self.cache_dir / f"sf_{scale_factor}" / "sampling_results.json"
         self.subset_out_path = pathlib.Path(
             subset_out_path
-            or f"agent_cost_model/datasubset/{use_case}/Q{query_id}_subset.csv"
+            or f"agent_cost_model/datasubset/{use_case}/sf_{scale_factor}/Q{query_id}_subset.csv"
         )
 
         # Embeddings are called over raw HTTP (not the OpenAI SDK helper): the
@@ -224,29 +261,41 @@ class LLM_Sampler:
         return " ".join(str(row[c]) for c in self.text_cols if pd.notna(row[c]))
 
     @staticmethod
-    def _words(text: str) -> set[str]:
-        """Lowercase full-word tokens (punctuation stripped, split on non-alnum).
+    def _norm(text: str) -> str:
+        """Space-joined lowercase full-word tokens (punctuation stripped).
 
-        Full-word only: 'dressing' tokenizes to {'dressing'}, so a 'dress' target
-        does not match it.
+        Normalizing both a phrase and the row text this way gives full-word AND
+        phrase matching: 'dressing' -> 'dressing' (so a 'dress' target does not
+        match it), and 'crew-neck'/'crew neck' both -> 'crew neck', so the phrase
+        matches only when both words appear contiguously.
         """
-        return set(re.findall(r"[a-z0-9]+", text.lower()))
+        return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
 
-    def _row_keyword_words(self, row: pd.Series) -> set[str]:
-        """Full-word token set of a row's text data (all text columns)."""
+    def _row_keyword_text(self, row: pd.Series) -> str:
+        """Normalized, space-padded token string of a row's text data.
+
+        Padded with a leading/trailing space so `f" {phrase} " in text` is an
+        exact full-word / phrase match at any position.
+        """
         text = " ".join(str(row[c]) for c in self._keyword_cols if pd.notna(row[c]))
-        return self._words(text)
+        return f" {self._norm(text)} "
 
     @classmethod
-    def _target_groups(cls, desc: str) -> list[set[str]]:
-        """Split a target description into disjoint concept groups.
+    def _target_groups(cls, desc: str) -> list[list[str]]:
+        """Split a target description into concept groups of (possibly multi-word) phrases.
 
-        A period "." separates concepts (AND); commas within a concept list
-        synonyms (OR). Returns one word-set per non-empty concept, e.g.
-        "black. accessory, watch, bag" -> [{'black'}, {'accessory','watch','bag'}].
+        A period "." separates concepts (AND); commas within a concept separate
+        synonym phrases (OR). Each phrase is normalized and matched as a
+        contiguous unit, e.g.
+        "men's. round neck, crew neck. short sleeve" ->
+        [["men s"], ["round neck", "crew neck"], ["short sleeve"]].
         """
-        groups = [cls._words(part) for part in desc.split(".")]
-        return [g for g in groups if g]
+        groups = []
+        for concept in desc.split("."):
+            phrases = [p for p in (cls._norm(part) for part in concept.split(",")) if p]
+            if phrases:
+                groups.append(phrases)
+        return groups
 
     # ------------------------------------------------------------- embeddings
     def _embed_call(self, input_value: Any) -> tuple[np.ndarray, float, float]:
@@ -380,7 +429,7 @@ class LLM_Sampler:
                 entry = self._row_costs.setdefault(rid, self._empty_cost())
                 entry["text_cost"], entry["text_latency"] = tcost, tlat
                 dirty = True
-            if self.image_dir and rid not in self._image_emb:
+            if self._use_image and rid not in self._image_emb:
                 img_path = pathlib.Path(self.image_dir) / f"{rid}.jpg"
                 if img_path.exists():
                     ivec, icost, ilat = self._embed_image(img_path)
@@ -476,17 +525,35 @@ class LLM_Sampler:
                 out.append({"filter": item[0], "description": item[1]})
         return out
 
+    def _descriptions_usable(self) -> bool:
+        """A description only helps if it can be scored -- embedded (text/image) or
+        keyword-matched against row text. If none of those apply (e.g. an image-only
+        query run with no_image_emb), asking for descriptions is pointless.
+        """
+        return bool(
+            self._use_image or self.text_cols or (self.keyword and self._keyword_cols)
+        )
+
     def identify_sampling_targets(self) -> list[tuple[Optional[Callable], Optional[str]]]:
         """Single LLM call → list of (filter_fn | None, description | None)."""
+        system = _SYSTEM_PROMPT if self._descriptions_usable() else _SYSTEM_PROMPT_FILTER_ONLY
         schema = ", ".join(f"{c} ({self.df[c].dtype})" for c in self.df.columns)
+        # Show the first 15 rows so the model can see the data format/vocabulary;
+        # cap each row at 3000 chars (some columns hold long text/JSON blobs).
+        sample_rows = [
+            str(row.to_dict())[:3000] for _, row in self.df.head(15).iterrows()
+        ]
+        sample_block = "\n".join(sample_rows)
         user = (
             f"Query:\n{self.query_text}\n\n"
             f"Columns: {schema}\n\n"
+            f"First {len(sample_rows)} rows of the dataset (each truncated to 3000 chars):\n"
+            f"{sample_block}\n\n"
             "Return the JSON array of sampling targets."
         )
         t0 = time.time()
         content, _reasoning, meta = self.llm_client.generate(
-            _SYSTEM_PROMPT, [{"role": "user", "content": user}]
+            system, [{"role": "user", "content": user}]
         )
         self._id_llm_latency += time.time() - t0
         self._id_llm_cost += float((meta or {}).get("cost_usd", 0.0) or 0.0)
@@ -507,7 +574,7 @@ class LLM_Sampler:
             tvec = self._text_emb.get(rid)
             if tvec is not None:
                 sim += self._cosine(desc_vec, tvec)
-        if self.image_dir:
+        if self._use_image:
             ivec = self._image_emb.get(rid)
             if ivec is not None:
                 sim += self._cosine(desc_vec, ivec)
@@ -531,11 +598,11 @@ class LLM_Sampler:
             sampled = [int(x) for x in rng.choice(all_ids, size=k, replace=False)]
         else:
             self._load_or_precompute()
-            # Precompute each row's full-word token set once for keyword matching.
-            kw_index: dict[int, set[str]] = {}
+            # Precompute each row's normalized (space-padded) text once for keyword matching.
+            kw_index: dict[int, str] = {}
             if self.keyword:
                 kw_index = {
-                    int(row[self.id_col]): self._row_keyword_words(row)
+                    int(row[self.id_col]): self._row_keyword_text(row)
                     for _, row in self.df.iterrows()
                 }
             n = len(targets)
@@ -551,8 +618,12 @@ class LLM_Sampler:
                     pool_ids = list(all_ids)
                 if not pool_ids:
                     continue
-                if desc is None:
-                    # Exclude ids already picked, then draw fresh uniques (never a duplicate).
+                # Score is meaningful only when at least one embedding modality
+                # is available; without it, similarity is 0 for every row and
+                # topk / importance-sampling degenerates to arbitrary selection.
+                can_score = bool(self._use_image or self.text_cols)
+                if desc is None or not can_score:
+                    # Uniform draw from the filtered pool (after excluding already-picked ids).
                     avail_ids = [rid for rid in pool_ids if rid not in selected]
                     take = min(k, len(avail_ids))
                     if take <= 0:
@@ -568,12 +639,17 @@ class LLM_Sampler:
                     for rid in pool_ids:
                         used_rows.add(rid)
                         s = self._row_similarity(desc_vec, rid)
-                        # +1 for EACH concept group that has >=1 word in the row text.
-                        # e.g. target "black. accessory, watch, bag": if "black",
-                        # "watch" and "bag" all appear, both groups hit -> +2.
+                        # +1 for EACH concept group with >=1 phrase present in the
+                        # row text. Phrases match as contiguous units, e.g. target
+                        # "round neck, crew neck. short sleeve": "crew neck" counts
+                        # only if both words appear together, not just "crew".
                         if target_groups:
-                            row_words = kw_index.get(rid, set())
-                            s += sum(1 for g in target_groups if g & row_words)
+                            row_text = kw_index.get(rid, " ")
+                            s += sum(
+                                1
+                                for phrases in target_groups
+                                if any(f" {p} " in row_text for p in phrases)
+                            )
                         sims_by_id[rid] = s
                     # Exclude ids already picked so a collision selects another unique
                     # id from the remaining candidates instead of shrinking the subset.
@@ -633,7 +709,7 @@ class LLM_Sampler:
             if self.text_cols:
                 row_cost += c.get("text_cost", 0.0)
                 row_latency += c.get("text_latency", 0.0)
-            if self.image_dir:
+            if self._use_image:
                 row_cost += c.get("image_cost", 0.0)
                 row_latency += c.get("image_latency", 0.0)
         # Separate the two cost/latency sources: the embedding work (description +
@@ -652,6 +728,7 @@ class LLM_Sampler:
             "embedding_model": self.embedding_model,
             "sample_method": self.sample_method,
             "keyword": self.keyword,
+            "no_image_emb": self.no_image_emb,
             "sampled_ids": [int(x) for x in sampled_ids],
             "targets": self._raw_targets,
         }
@@ -677,8 +754,9 @@ def _main() -> None:
 
     ap = argparse.ArgumentParser(description="Run LLM_Sampler for one query.")
     ap.add_argument("--use-case", default="ecomm")
+    ap.add_argument("--scale-factor", type=int, default=500)
     ap.add_argument("--query-id", type=int, required=True)
-    ap.add_argument("--data-dir", default=None, help="defaults to agent_cost_model/dataset/{use_case}")
+    ap.add_argument("--data-dir", default=None, help="defaults to agent_cost_model/dataset/{use_case}/sf_{scale_factor}")
     ap.add_argument("--csv", default=None, help="source CSV filename; defaults to styles_details.csv")
     ap.add_argument("--query", required=True, help="natural-language query text")
     ap.add_argument("--id-col", default="prod_id")
@@ -690,11 +768,13 @@ def _main() -> None:
                     help="how to pick rows from cosine-similarity scores per described target")
     ap.add_argument("--keyword", action="store_true",
                     help="add +1 to a row's similarity if any full word of the LLM target appears in its text")
+    ap.add_argument("--no_image_emb", action="store_true",
+                    help="ignore image embeddings when scoring, even if the dataset has images (avoids costly image embedding)")
     args = ap.parse_args()
 
     from cost_model_agent import OpenRouterClient
 
-    data_dir = args.data_dir or f"agent_cost_model/dataset/{args.use_case}"
+    data_dir = args.data_dir or f"agent_cost_model/dataset/{args.use_case}/sf_{args.scale_factor}"
     csv = args.csv or f"styles_details_Q{args.query_id}.csv"
     df = pd.read_csv(os.path.join(data_dir, csv))
     image_dir = os.path.join(data_dir, "images") if args.images else None
@@ -702,6 +782,7 @@ def _main() -> None:
     sampler = LLM_Sampler(
         query_id=args.query_id,
         use_case=args.use_case,
+        scale_factor=args.scale_factor,
         query_text=args.query,
         df=df,
         llm_client=OpenRouterClient(args.model, reasoning_effort="medium"),
@@ -710,6 +791,7 @@ def _main() -> None:
         image_dir=image_dir,
         sample_method=args.sample_method,
         keyword=args.keyword,
+        no_image_emb=args.no_image_emb,
     )
     targets = sampler.identify_sampling_targets()
     print("LLM identified sampling targets:") #debug print
