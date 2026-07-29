@@ -1,0 +1,362 @@
+{
+  "1_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 1,
+    "scale_factor": 2000,
+    "latency": 67.0076,
+    "cost": 0.630092,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "1_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 1,
+    "scale_factor": 2000,
+    "latency": 71.3221,
+    "cost": 0.629977,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "1_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 1,
+    "scale_factor": 2000,
+    "latency": 58.077,
+    "cost": 0.167321,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "1_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 1,
+    "scale_factor": 2000,
+    "latency": 56.6359,
+    "cost": 0.167437,
+    "metric_type": "f1_score",
+    "quality": 1.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "2_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 2,
+    "scale_factor": 2000,
+    "latency": 99.2607,
+    "cost": 0.799796,
+    "metric_type": "f1_score",
+    "quality": 0.007343941248470012,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "2_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 2,
+    "scale_factor": 2000,
+    "latency": 100.6055,
+    "cost": 0.800484,
+    "metric_type": "f1_score",
+    "quality": 0.00736196319018405,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "2_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 2,
+    "scale_factor": 2000,
+    "latency": 60.2334,
+    "cost": 0.116869,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "2_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 2,
+    "scale_factor": 2000,
+    "latency": 60.1947,
+    "cost": 0.11687,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "3_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 3,
+    "scale_factor": 2000,
+    "latency": 54.0251,
+    "cost": 0.489977,
+    "metric_type": "accuracy",
+    "quality": 0.9105906269697006,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "3_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 3,
+    "scale_factor": 2000,
+    "latency": 53.4786,
+    "cost": 0.489994,
+    "metric_type": "accuracy",
+    "quality": 0.9105906269697006,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "3_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 3,
+    "scale_factor": 2000,
+    "latency": 45.1244,
+    "cost": 0.146559,
+    "metric_type": "accuracy",
+    "quality": 0.9262315270367475,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "3_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 3,
+    "scale_factor": 2000,
+    "latency": 44.1777,
+    "cost": 0.146555,
+    "metric_type": "accuracy",
+    "quality": 0.9275199558774886,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "4_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 4,
+    "scale_factor": 2000,
+    "latency": 90.4347,
+    "cost": 0.973577,
+    "metric_type": "accuracy",
+    "quality": 0.6465253346791023,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "4_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 4,
+    "scale_factor": 2000,
+    "latency": 90.8136,
+    "cost": 0.973577,
+    "metric_type": "accuracy",
+    "quality": 0.6464969978885603,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "4_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 4,
+    "scale_factor": 2000,
+    "latency": 97.018,
+    "cost": 0.298798,
+    "metric_type": "accuracy",
+    "quality": 0.5541974882059171,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "4_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 4,
+    "scale_factor": 2000,
+    "latency": 99.6931,
+    "cost": 0.299632,
+    "metric_type": "accuracy",
+    "quality": 0.5524306403096712,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "5_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 5,
+    "scale_factor": 2000,
+    "latency": 54.5556,
+    "cost": 0.615127,
+    "metric_type": "accuracy",
+    "quality": 0.9779630234350604,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "5_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 5,
+    "scale_factor": 2000,
+    "latency": 53.1094,
+    "cost": 0.615124,
+    "metric_type": "accuracy",
+    "quality": 0.9779630234350604,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "5_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 5,
+    "scale_factor": 2000,
+    "latency": 45.5014,
+    "cost": 0.188628,
+    "metric_type": "accuracy",
+    "quality": 0.9890274125614276,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "5_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 5,
+    "scale_factor": 2000,
+    "latency": 43.7929,
+    "cost": 0.188629,
+    "metric_type": "accuracy",
+    "quality": 0.9855255162185375,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "6_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 6,
+    "scale_factor": 2000,
+    "latency": 159.8731,
+    "cost": 1.741493,
+    "metric_type": "accuracy",
+    "quality": 0.8903665762501082,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "6_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 6,
+    "scale_factor": 2000,
+    "latency": 172.5048,
+    "cost": 1.741491,
+    "metric_type": "accuracy",
+    "quality": 0.8903665762501082,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "6_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 6,
+    "scale_factor": 2000,
+    "latency": 267.6994,
+    "cost": 0.540499,
+    "metric_type": "accuracy",
+    "quality": 0.7690893778951446,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "6_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 6,
+    "scale_factor": 2000,
+    "latency": 170.4551,
+    "cost": 0.536345,
+    "metric_type": "accuracy",
+    "quality": 0.7773581022352813,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "8_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 8,
+    "scale_factor": 2000,
+    "latency": 42.3326,
+    "cost": 0.860894,
+    "metric_type": "f1_score",
+    "quality": 0.2531645569620253,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "8_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 8,
+    "scale_factor": 2000,
+    "latency": 43.611,
+    "cost": 0.860894,
+    "metric_type": "f1_score",
+    "quality": 0.2531645569620253,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "8_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 8,
+    "scale_factor": 2000,
+    "latency": 119.8402,
+    "cost": 0.269744,
+    "metric_type": "f1_score",
+    "quality": 0.4375,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "8_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 8,
+    "scale_factor": 2000,
+    "latency": 121.8472,
+    "cost": 0.268959,
+    "metric_type": "f1_score",
+    "quality": 0.39999999999999997,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "9_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 9,
+    "scale_factor": 2000,
+    "latency": 2284.3766,
+    "cost": 19.380295,
+    "metric_type": "f1_score",
+    "quality": 0.004803917040048039,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "9_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 9,
+    "scale_factor": 2000,
+    "latency": 695.7931,
+    "cost": 0.0,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "9_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 9,
+    "scale_factor": 2000,
+    "latency": 2210.7234,
+    "cost": 5.780218,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "9_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 9,
+    "scale_factor": 2000,
+    "latency": 2152.6951,
+    "cost": 5.745965,
+    "metric_type": "f1_score",
+    "quality": 0.0,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "12_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 12,
+    "scale_factor": 2000,
+    "latency": 75.8641,
+    "cost": 0.793104,
+    "metric_type": "f1_score",
+    "quality": 0.9782082324455207,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "12_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 12,
+    "scale_factor": 2000,
+    "latency": 74.2044,
+    "cost": 0.792982,
+    "metric_type": "f1_score",
+    "quality": 0.9782082324455207,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "12_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 12,
+    "scale_factor": 2000,
+    "latency": 83.1145,
+    "cost": 0.231308,
+    "metric_type": "f1_score",
+    "quality": 0.9782082324455207,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "12_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 12,
+    "scale_factor": 2000,
+    "latency": 67.2444,
+    "cost": 0.227902,
+    "metric_type": "f1_score",
+    "quality": 0.9782082324455207,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "13_GOOGLE_GEMINI_2_5_FLASH_1": {
+    "query_id": 13,
+    "scale_factor": 2000,
+    "latency": 125.9281,
+    "cost": 1.367935,
+    "metric_type": "f1_score",
+    "quality": 0.41379310344827586,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "13_GOOGLE_GEMINI_2_5_FLASH_2": {
+    "query_id": 13,
+    "scale_factor": 2000,
+    "latency": 123.4189,
+    "cost": 1.367487,
+    "metric_type": "f1_score",
+    "quality": 0.41379310344827586,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH"
+  },
+  "13_GOOGLE_GEMINI_2_5_FLASH_LITE_1": {
+    "query_id": 13,
+    "scale_factor": 2000,
+    "latency": 62.7336,
+    "cost": 0.232376,
+    "metric_type": "f1_score",
+    "quality": 0.42857142857142855,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  },
+  "13_GOOGLE_GEMINI_2_5_FLASH_LITE_2": {
+    "query_id": 13,
+    "scale_factor": 2000,
+    "latency": 63.8212,
+    "cost": 0.231738,
+    "metric_type": "f1_score",
+    "quality": 0.42857142857142855,
+    "model": "pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE"
+  }
+}

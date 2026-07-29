@@ -1,0 +1,154 @@
+{
+  "3": {
+    "query_id": "3",
+    "target_latency": 3.955011,
+    "embedding_latency": 29.183151,
+    "target_cost": 0.007863,
+    "embedding_cost": 0.0019016,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      "2241667",
+      "2434911",
+      "2240508",
+      "2829828",
+      "2241270",
+      "2241491",
+      "2310947",
+      "2241675",
+      "2241762",
+      "2321621"
+    ],
+    "targets": [
+      {
+        "filter": "row[\"idx\"] == \"taken_3\"",
+        "description": "positive review, favorable review, praise"
+      }
+    ]
+  },
+  "7": {
+    "query_id": "7",
+    "target_latency": 6.251548,
+    "embedding_latency": 32.071814,
+    "target_cost": 0.0074015,
+    "embedding_cost": 0.0029884,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      "102779524",
+      "102782734",
+      "102779490",
+      "102781057",
+      "102779560",
+      "102779962",
+      "102779596",
+      "102781076",
+      "102783393",
+      "102780259"
+    ],
+    "targets": [
+      {
+        "filter": "row[\"idx\"] == \"ant_man_and_the_wasp_quantumania\"",
+        "description": "positive review, praise. great, fun, entertaining, epic"
+      },
+      {
+        "filter": "row[\"idx\"] == \"ant_man_and_the_wasp_quantumania\"",
+        "description": "negative review, criticism. bad, messy, dull, disappointing"
+      }
+    ]
+  },
+  "9": {
+    "query_id": "9",
+    "target_latency": 10.958024,
+    "embedding_latency": 32.595393,
+    "target_cost": 0.011839,
+    "embedding_cost": 0.0029908,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      "102779550",
+      "102779984",
+      "102779524",
+      "102782734",
+      "102779951",
+      "102781057",
+      "102779761",
+      "102779507",
+      "102779962",
+      "102781076"
+    ],
+    "targets": [
+      {
+        "filter": "row[\"idx\"] == \"ant_man_and_the_wasp_quantumania\"",
+        "description": null
+      },
+      {
+        "filter": "row[\"idx\"] == \"ant_man_and_the_wasp_quantumania\"",
+        "description": "excellent, amazing, thrilling, epic, fun"
+      },
+      {
+        "filter": "row[\"idx\"] == \"ant_man_and_the_wasp_quantumania\"",
+        "description": "good, enjoyable, funny, charming, entertaining"
+      },
+      {
+        "filter": "row[\"idx\"] == \"ant_man_and_the_wasp_quantumania\"",
+        "description": "mixed, uneven, messy, flawed, inconsistent"
+      },
+      {
+        "filter": "row[\"idx\"] == \"ant_man_and_the_wasp_quantumania\"",
+        "description": "bad, boring, dull, disappointing, messy"
+      }
+    ]
+  },
+  "10": {
+    "query_id": "10",
+    "target_latency": 7.689281,
+    "embedding_latency": 490.220158,
+    "target_cost": 0.016325,
+    "embedding_cost": 0.0365128,
+    "embedding_model": "google/gemini-embedding-2",
+    "sample_method": "topk",
+    "keyword": true,
+    "no_image_emb": true,
+    "sampled_ids": [
+      "2522243",
+      "2647348",
+      "2545734",
+      "2404321",
+      "102662655",
+      "102780513",
+      "2753948",
+      "2550109",
+      "102781420",
+      "102779984"
+    ],
+    "targets": [
+      {
+        "filter": null,
+        "description": "excellent, magnificent, outstanding, masterpiece"
+      },
+      {
+        "filter": null,
+        "description": "good, enjoyable, entertaining, satisfying"
+      },
+      {
+        "filter": null,
+        "description": "entertaining, funny, intriguing. flawed, messy, overlong"
+      },
+      {
+        "filter": null,
+        "description": "weak, dull, disappointing, cumbersome"
+      },
+      {
+        "filter": null,
+        "description": "awful, dreadful, atrocious, painful"
+      }
+    ]
+  }
+}
