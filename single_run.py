@@ -10,7 +10,7 @@ agent_cost_model/cost_model_agent.py):
     (PZ wrapped). Do NOT call .run() in the plan; this script runs it.
   * plan code is run with the same injected env the agent gives it: `load_data`,
     `add_image_data`, `plan_name`, `data_dir`, `pd`, `os`, `pz`, `PhysicalPipeline`.
-    `load_data` reads CSVs from agent_cost_model/dataset/{use_case}/sf_{sf}/.
+    `load_data` reads CSVs from ../agent_cost_model/experiments/dataset/{use_case}/sf_{sf}/.
   * the plan file is treated as a Jinja template. The only supported template
     variable is `model`, which should be used for every operator in that plan.
   * every query/model/run combination is executed with a fresh environment so the
@@ -42,7 +42,9 @@ from pathlib import Path
 from jinja2 import Template
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(PROJECT_ROOT))            # agent/, agent_cost_model/
+WORKSPACE_ROOT = PROJECT_ROOT.parent
+sys.path.insert(0, str(WORKSPACE_ROOT))           # agent_cost_model submodule
+sys.path.insert(0, str(PROJECT_ROOT))            # SemBench source
 sys.path.insert(0, str(PROJECT_ROOT / "src"))    # runner/, scenario/, evaluator/
 
 try:
@@ -62,7 +64,7 @@ from runner.generic_palimpzest_runner.generic_palimpzest_runner import (  # noqa
 
 import palimpzest as pz
 from agent.physical_pipeline import PhysicalPipeline
-from agent_cost_model.quality_evaluator import _load_evaluator, normalize_eval_df
+from agent_cost_model.experiments.SemBench.quality_evaluator import load_evaluator, normalize_eval_df
 
 # Default model used to run a PZ-wrapped (pz.Dataset) plan, whose operators do not
 # pin a model themselves. PhysicalPipeline plans pin models per operator and ignore this.
@@ -76,9 +78,8 @@ _MODEL_MAP = {
 
 # Edit these lists directly to choose which queries and models to run.
 # QUERY_IDS = [id for id in range(1,14) if id not in [7,10,11]]
-QUERY_IDS =[12,13]
-MODELS = ["pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE",
-          "pz.Model.GOOGLE_GEMINI_2_5_FLASH"]
+QUERY_IDS =[10]
+MODELS = ["pz.Model.GOOGLE_GEMINI_2_5_FLASH_LITE", "pz.Model.GOOGLE_GEMINI_2_5_FLASH"]
 # "pz.Model.GOOGLE_GEMINI_2_5_PRO"
 
 # Plan filename: Q{id}_{plan name}(.txt)
@@ -124,7 +125,7 @@ def resolve_data_dir(use_case: str, scale_factor: int, mode: str) -> Path:
     """
     if mode == "pz":
         return PROJECT_ROOT / "files" / use_case / "data" / f"sf_{scale_factor}"
-    ds_root = PROJECT_ROOT / "agent_cost_model" / "dataset" / use_case
+    ds_root = WORKSPACE_ROOT / "agent_cost_model" / "experiments" / "dataset" / use_case
     for cand in (ds_root / f"sf_{scale_factor}", ds_root):
         if cand.exists():
             return cand
@@ -150,15 +151,25 @@ def normalize_model_for_pz(model_name: str) -> str:
 
 def resolve_plan_template(use_case: str, query_id: int) -> Path:
     """Resolve the fixed template path for a given query id."""
-    txt_path = (
-        PROJECT_ROOT
-        / "files"
-        / use_case
-        / "queries"
-        / "dialects"
-        / "palimpzest"
-        / f"Q{query_id}_palimpzest.txt"
-    )
+    if use_case == "ecomm":
+        txt_path = (
+            PROJECT_ROOT
+            / "files"
+            / use_case
+            / "queries"
+            / "dialects"
+            / "palimpzest"
+            / f"Q{query_id}_palimpzest.txt"
+        )
+    elif use_case == "movie":
+        txt_path = (
+            PROJECT_ROOT
+            / "files"
+            / use_case
+            / "query"
+            / "palimpzest"
+            / f"Q{query_id}_palimpzest.txt"
+        )
     if not txt_path.exists():
         raise SystemExit(f"Plan file not found for Q{query_id}: {txt_path}")
     return txt_path
@@ -314,7 +325,7 @@ def execute_plan(plan_code, env, model_name):
 
 def evaluate(use_case, scale_factor, plan_name, query_id, results_df, gt_path):
     """Normalize plan output and score it against ground truth. Returns (metric_type, quality)."""
-    evaluator = _load_evaluator(use_case, scale_factor, plan_name)
+    evaluator = load_evaluator(use_case, scale_factor)
     if gt_path.exists():
         gt_df = pd.read_csv(gt_path)
     else:

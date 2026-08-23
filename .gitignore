@@ -1,3 +1,17 @@
+#Data
+*.txt
+*.csv
+*.json
+*.sql
+*.jpg
+*.png
+
+# Keep metrics JSON files for sf_500 and sf_2000 scale factors
+!files/*/metrics/sf_500/*.json
+!files/*/metrics/sf_2000/*.json
+!agent_cost_model/sampling/*/sf_500/*.json
+!agent_cost_model/sampling/*/sf_2000/*.json
+
 # Secrets
 .env
 

@@ -16,17 +16,17 @@ safetensors>=0.3.0
 tokenizers>=0.13.0
 
 # System-Specific Packages (CRITICAL - EXACT VERSIONS)
-lotus-ai==1.1.3
+# lotus-ai==1.1.3
 palimpzest==0.8.2
-thalamusdb==0.1.15
+# thalamusdb==0.1.15
 
 # Google Cloud & BigQuery
-google-cloud-bigquery>=3.10.0
-google-cloud-storage>=3.5.0
-google-cloud-bigquery-storage>=2.34.0
-db-dtypes>=1.4.0
-google-auth>=2.20.0
-googleapis-common-protos>=1.60.0
+# google-cloud-bigquery>=3.10.0
+# google-cloud-storage>=3.5.0
+# google-cloud-bigquery-storage>=2.34.0
+# db-dtypes>=1.4.0
+# google-auth>=2.20.0
+# googleapis-common-protos>=1.60.0
 
 # LLM & AI Libraries
 openai>=1.0.0
